@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>反馈 · 无人车地面站</title>
+<style>
+  :root{--bg:#0a0f16;--surface:#121a24;--surface2:#1a2533;--line:#26303f;--ink:#eaf1f8;--muted:#8593a4;
+    --accent:#22c486;--accent2:#2fe09a;--accent-d:#17a06d;--danger:#ef4d56}
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Microsoft YaHei",Segoe UI,sans-serif;
+    display:flex;align-items:flex-start;justify-content:center;min-height:100vh;padding:32px 16px}
+  .card{width:100%;max-width:560px;background:var(--surface);border:1px solid var(--line);border-radius:14px;
+    box-shadow:0 8px 30px rgba(0,0,0,.45);overflow:hidden}
+  .hd{padding:18px 22px;border-bottom:1px solid var(--line)}
+  .hd h1{margin:0;font-size:18px;display:flex;align-items:center;gap:9px}
+  .hd .sub{color:var(--muted);font-size:12.5px;margin-top:5px}
+  .bd{padding:18px 22px}
+  label{display:block;font-size:12.5px;color:var(--muted);margin:14px 0 6px}
+  label:first-child{margin-top:0}
+  select,textarea,input{width:100%;background:var(--surface2);color:var(--ink);border:1px solid var(--line);
+    border-radius:9px;padding:10px 12px;font:inherit}
+  select:focus,textarea:focus,input:focus{outline:none;border-color:var(--accent)}
+  textarea{min-height:130px;resize:vertical}
+  .req{color:var(--danger)}
+  button{margin-top:18px;width:100%;background:linear-gradient(180deg,var(--accent2),var(--accent));
+    border:1px solid var(--accent-d);color:#04130c;font-weight:700;font-size:15px;border-radius:9px;padding:12px;cursor:pointer}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .msg{margin-top:14px;padding:11px 13px;border-radius:9px;font-size:13px;display:none}
+  .msg.ok{display:block;background:rgba(34,196,134,.12);border:1px solid var(--accent-d);color:var(--accent2)}
+  .msg.err{display:block;background:rgba(239,77,86,.12);border:1px solid var(--danger);color:#ff8b91}
+  .foot{padding:14px 22px;border-top:1px solid var(--line);font-size:12.5px;color:var(--muted);display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+  .foot a{color:var(--accent2);text-decoration:none}
+  .note{font-size:11.5px;color:var(--muted);margin-top:8px;line-height:1.5}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="hd">
+      <h1>🚜 反馈 / 建议</h1>
+      <div class="sub">无人车地面站 · 你的反馈会被记录，并由维护者（含 AI 辅助）跟进——需要改的会改，不需要改的会回复你。</div>
+    </div>
+    <div class="bd">
+      <form id="form">
+        <label>类别</label>
+        <select id="category">
+          <option value="界面/UX">界面 / 交互体验</option>
+          <option value="功能/Bug">功能 / Bug</option>
+          <option value="地图/坐标">地图 / 坐标</option>
+          <option value="任务/航点">任务 / 航点</option>
+          <option value="其他">其他</option>
+        </select>
+        <label>反馈内容 <span class="req">*</span></label>
+        <textarea id="text" placeholder="描述你遇到的问题、期望的改动，或任何建议……" maxlength="4000" required></textarea>
+        <label>联系方式（可选，方便回复你）</label>
+        <input id="contact" placeholder="邮箱 / 微信 / 飞书…（留空也可以）" maxlength="200">
+        <button id="submit" type="submit">提交反馈</button>
+        <div class="msg" id="msg"></div>
+        <div class="note">提交即表示你同意内容被记录用于改进本项目。请勿提交敏感信息。</div>
+      </form>
+    </div>
+    <div class="foot">
+      <a href="/">← 返回地面站</a>
+      <span id="count"></span>
+    </div>
+  </div>
+<script>
+  const form = document.getElementById('form'), msg = document.getElementById('msg'), btn = document.getElementById('submit');
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const text = document.getElementById('text').value.trim();
+    if (!text) return;
+    btn.disabled = true; btn.textContent = '提交中…'; msg.className = 'msg';
+    try {
+      const r = await fetch('/api/feedback', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, contact: document.getElementById('contact').value.trim(), category: document.getElementById('category').value }),
+      });
+      const d = await r.json();
+      if (r.ok && d.ok) {
+        msg.className = 'msg ok'; msg.textContent = '✓ 已收到，谢谢！编号 ' + d.id + '。维护者会跟进处理。';
+        document.getElementById('text').value = ''; document.getElementById('contact').value = '';
+      } else { msg.className = 'msg err'; msg.textContent = '✗ 提交失败：' + (d.error || r.status); }
+    } catch (err) { msg.className = 'msg err'; msg.textContent = '✗ 网络错误：' + err.message; }
+    btn.disabled = false; btn.textContent = '提交反馈';
+  });
+</script>
+</body>
+</html>

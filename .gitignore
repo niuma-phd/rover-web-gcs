@@ -15,3 +15,6 @@ public/测试手册.html
 # 天地图 tk 密钥注入文件 + 本地坐标核验页（含/引用密钥）— 绝不提交到公共仓库
 public/config.js
 public/verify-tdt.html
+# 整站口令 + 反馈数据（含联系方式）— 绝不提交
+.site-auth
+data/

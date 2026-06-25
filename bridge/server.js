@@ -569,19 +569,86 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; cha
   '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml',
   '.png': 'image/png', '.ico': 'image/x-icon' };
 
+// ---- whole-site password (opt-in: enforced only if .site-auth / GCS_SITE_AUTH is set;
+//      empty => disabled, so local dev / current usage is unaffected) ----
+function readSiteAuth() {
+  try { return fs.readFileSync(path.join(__dirname, '..', '.site-auth'), 'utf8').trim(); } catch (_) {}
+  return (process.env.GCS_SITE_AUTH || '').trim();
+}
+const SITE_AUTH = readSiteAuth(); // "user:pass"
+if (SITE_AUTH) log('whole-site password ENABLED');
+function authOk(req) {
+  if (!SITE_AUTH) return true;
+  const m = (req.headers['authorization'] || '').match(/^Basic\s+(.+)$/i);
+  if (!m) return false;
+  let dec = ''; try { dec = Buffer.from(m[1], 'base64').toString('utf8'); } catch (_) { return false; }
+  const a = Buffer.from(dec), b = Buffer.from(SITE_AUTH);
+  return a.length === b.length && require('crypto').timingSafeEqual(a, b);
+}
+function need401(res) {
+  res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Rover GCS"', 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end('需要登录 / authentication required');
+}
+
+// ---- feedback store (local, gitignored) ----
+const DATA_DIR = path.join(__dirname, '..', 'data');
+const FEEDBACK_FILE = path.join(DATA_DIR, 'feedback.jsonl');
+function appendFeedback(item) {
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (_) {}
+  fs.appendFileSync(FEEDBACK_FILE, JSON.stringify(item) + '\n');
+}
+function readFeedback() {
+  try {
+    return fs.readFileSync(FEEDBACK_FILE, 'utf8').split('\n').filter(Boolean)
+      .map((l) => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
+  } catch (_) { return []; }
+}
+
 const server = http.createServer((req, res) => {
+  if (!authOk(req)) return need401(res);
   let urlPath = decodeURIComponent((req.url || '/').split('?')[0]);
+
+  // ---- feedback API ----
+  if (urlPath === '/api/feedback' && req.method === 'POST') {
+    let body = '', tooBig = false;
+    req.on('data', (c) => { body += c; if (body.length > 16384) { tooBig = true; req.destroy(); } });
+    req.on('end', () => {
+      if (tooBig) { res.writeHead(413); res.end('too large'); return; }
+      let d; try { d = JSON.parse(body || '{}'); } catch (_) { res.writeHead(400); res.end('{"ok":false}'); return; }
+      const text = (d.text || '').toString().slice(0, 4000).trim();
+      if (!text) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end('{"ok":false,"error":"empty"}'); return; }
+      const item = {
+        id: 'fb_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        ts: new Date().toISOString(), text,
+        contact: (d.contact || '').toString().slice(0, 200),
+        category: (d.category || '').toString().slice(0, 40),
+        status: 'new', reply: null, ua: (req.headers['user-agent'] || '').slice(0, 200),
+      };
+      appendFeedback(item); log('feedback received: ' + item.id);
+      res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, id: item.id }));
+    });
+    return;
+  }
+  if (urlPath === '/api/feedback' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(readFeedback())); return;
+  }
+
+  // ---- static files ----
   if (urlPath === '/') urlPath = '/index.html';
+  if (urlPath === '/feedback') urlPath = '/feedback.html';
   const file = path.join(PUBLIC, path.normalize(urlPath));
   if (!file.startsWith(PUBLIC)) { res.writeHead(403); res.end('forbidden'); return; }
   fs.readFile(file, (err, data) => {
     if (err) { res.writeHead(404); res.end('not found'); return; }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
+    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
     res.end(data);
   });
 });
 
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({ server, verifyClient: (info, cb) => {
+  if (authOk(info.req)) return cb(true);
+  cb(false, 401, 'auth required');
+} });
 wss.on('connection', (ws) => {
   clients.add(ws);
   log('browser connected (' + clients.size + ')');

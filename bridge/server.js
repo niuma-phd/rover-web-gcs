@@ -603,6 +603,18 @@ function readFeedback() {
       .map((l) => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
   } catch (_) { return []; }
 }
+// ---- optional feedback screenshot (one image per feedback, gitignored) ----
+const IMG_DIR = path.join(DATA_DIR, 'feedback-images');
+const IMG_TYPES = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
+const IMG_CTYPE = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' };
+function saveFeedbackImage(id, b64, type) {
+  const ext = IMG_TYPES[type]; if (!ext || !b64) return null;
+  let buf; try { buf = Buffer.from(String(b64), 'base64'); } catch (_) { return null; }
+  if (!buf.length || buf.length > 6 * 1024 * 1024) return null; // 6 MB decoded cap
+  try { fs.mkdirSync(IMG_DIR, { recursive: true }); fs.writeFileSync(path.join(IMG_DIR, id + '.' + ext), buf); }
+  catch (_) { return null; }
+  return id + '.' + ext;
+}
 
 const server = http.createServer((req, res) => {
   if (!authOk(req)) return need401(res);
@@ -611,7 +623,7 @@ const server = http.createServer((req, res) => {
   // ---- feedback API ----
   if (urlPath === '/api/feedback' && req.method === 'POST') {
     let body = '', tooBig = false;
-    req.on('data', (c) => { body += c; if (body.length > 16384) { tooBig = true; req.destroy(); } });
+    req.on('data', (c) => { body += c; if (body.length > 8 * 1024 * 1024) { tooBig = true; req.destroy(); } });
     req.on('end', () => {
       if (tooBig) { res.writeHead(413); res.end('too large'); return; }
       let d; try { d = JSON.parse(body || '{}'); } catch (_) { res.writeHead(400); res.end('{"ok":false}'); return; }
@@ -622,15 +634,24 @@ const server = http.createServer((req, res) => {
         ts: new Date().toISOString(), text,
         contact: (d.contact || '').toString().slice(0, 200),
         category: (d.category || '').toString().slice(0, 40),
-        status: 'new', reply: null, ua: (req.headers['user-agent'] || '').slice(0, 200),
+        image: null, status: 'new', reply: null, ua: (req.headers['user-agent'] || '').slice(0, 200),
       };
-      appendFeedback(item); log('feedback received: ' + item.id);
+      if (d.image) { const fn = saveFeedbackImage(item.id, d.image, String(d.imageType || '')); if (fn) item.image = fn; }
+      appendFeedback(item); log('feedback received: ' + item.id + (item.image ? ' (+screenshot)' : ''));
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, id: item.id }));
     });
     return;
   }
   if (urlPath === '/api/feedback' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(readFeedback())); return;
+  }
+  if (urlPath === '/api/feedback/image' && req.method === 'GET') {
+    const id = ((req.url.split('?')[1] || '').match(/(?:^|&)id=([^&]+)/) || [])[1] || '';
+    const safe = decodeURIComponent(id).replace(/[^a-z0-9_]/gi, '');
+    const hit = safe && Object.values(IMG_TYPES).map((e) => path.join(IMG_DIR, safe + '.' + e)).find((p) => fs.existsSync(p));
+    if (!hit) { res.writeHead(404); res.end('not found'); return; }
+    res.writeHead(200, { 'Content-Type': IMG_CTYPE[path.extname(hit).slice(1)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
+    fs.createReadStream(hit).pipe(res); return;
   }
 
   // ---- static files ----

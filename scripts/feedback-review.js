@@ -60,6 +60,7 @@ function cmdShow(id) {
   console.log(`when:    ${p.feedback.ts}`);
   console.log(`category:${p.feedback.category}`);
   console.log(`contact: ${p.feedback.contact || C.dim('(none)')}`);
+  if (p.feedback.image) console.log(`shot:    data/feedback-images/${p.feedback.image}   ${C.dim('(open to view)')}`);
   console.log(`risk:    ${p.risk}   needs_change: ${p.needs_change}   cost: $${p.cost_usd || '?'}`);
   console.log(C.b('\n--- feedback ---')); console.log(p.feedback.text);
   if (p.error) { console.log(C.r('\n--- ERROR ---')); console.log(p.error); if (p.raw) console.log(C.dim(p.raw)); return; }

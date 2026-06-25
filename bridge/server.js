@@ -282,7 +282,7 @@ function onPacket(packet) {
       break;
     }
     case common.StatusText.MSG_ID: {
-      broadcast({ t: 'text', severity: m.severity, text: String(m.text || '').replace(/ +$/,'') });
+      broadcast({ t: 'text', severity: m.severity, text: String(m.text || '').replace(/\x00+$/,'') });
       break;
     }
     case common.CommandAck.MSG_ID: {

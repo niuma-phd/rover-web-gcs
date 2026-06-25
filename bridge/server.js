@@ -121,6 +121,33 @@ const vehicle = {
 let upload = null;     // { items: [...], inflight: false }
 let download = null;   // { count: 0, seq: 0, items: [] }
 
+// Telemetry log (.tlog) state
+let tlogStream = null;
+let tlogPath = null;
+function writeTlog(frame) {
+  try {
+    const ts = Buffer.alloc(8);
+    ts.writeBigUInt64BE(BigInt(Date.now()) * 1000n); // microseconds, big-endian (QGC/MP .tlog format)
+    tlogStream.write(ts); tlogStream.write(frame);
+  } catch (_) {}
+}
+function tlogStart() {
+  if (tlogStream) return;
+  const dir = path.join(__dirname, '..', 'logs');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
+  const name = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.tlog';
+  tlogPath = path.join(dir, name);
+  tlogStream = fs.createWriteStream(tlogPath);
+  log('tlog recording -> ' + tlogPath);
+  broadcast({ t: 'tlog', recording: true, file: name });
+}
+function tlogStop() {
+  if (!tlogStream) return;
+  tlogStream.end(); tlogStream = null;
+  log('tlog stopped -> ' + tlogPath);
+  broadcast({ t: 'tlog', recording: false, file: path.basename(tlogPath || '') });
+}
+
 function mavSend(msg) {
   if (!transport || !transport.out) return;
   Promise.resolve(send(transport.out, msg, PROTOCOL)).catch((e) => log('send error: ' + e.message));
@@ -158,6 +185,7 @@ function connectLink(cfg) {
 }
 
 function disconnectLink() {
+  tlogStop();
   if (hbInterval) { clearInterval(hbInterval); hbInterval = null; }
   if (transport) { try { transport.close(); } catch (_) {} transport = null; }
   if (parser) { try { parser.removeAllListeners(); } catch (_) {} }
@@ -190,6 +218,7 @@ function requestDataStreams() {
 //  Incoming MAVLink -> browser telemetry
 // =============================================================================
 function onPacket(packet) {
+  if (tlogStream && packet.buffer) writeTlog(packet.buffer);
   const clazz = REGISTRY[packet.header.msgid];
   if (!clazz) return;
   let m;
@@ -238,6 +267,14 @@ function onPacket(packet) {
     }
     case common.VfrHud.MSG_ID: {
       broadcast({ t: 'vfr', gs: m.groundspeed, hdg: m.heading, throttle: m.throttle });
+      break;
+    }
+    case common.RadioStatus.MSG_ID: {
+      broadcast({ t: 'radio', rssi: m.rssi, remrssi: m.remrssi, noise: m.noise, remnoise: m.remnoise, txbuf: m.txbuf });
+      break;
+    }
+    case common.ParamValue.MSG_ID: {
+      broadcast({ t: 'param', id: String(m.paramId).replace(/\0+$/, ''), value: m.paramValue, ptype: m.paramType, index: m.paramIndex, count: m.paramCount });
       break;
     }
     case common.StatusText.MSG_ID: {
@@ -325,6 +362,27 @@ function doSetMode(modeNum) {
   sm.baseMode = minimal.MavModeFlag.CUSTOM_MODE_ENABLED; // 1
   sm.customMode = modeNum;
   mavSend(sm);
+}
+
+function doChangeSpeed(speed) {
+  // MAV_CMD_DO_CHANGE_SPEED: p1=0 (ground speed), p2=target m/s, p3=-1 (throttle unchanged)
+  cmdLong(common.MavCmd.DO_CHANGE_SPEED, { p1: 0, p2: speed, p3: -1 });
+}
+
+function getParams(names) {
+  for (const id of names) {
+    const r = new common.ParamRequestRead();
+    r.targetSystem = target.system; r.targetComponent = target.component;
+    r.paramId = id; r.paramIndex = -1; // -1 => look up by name
+    mavSend(r);
+  }
+}
+
+function setParam(id, value) {
+  const ps = new common.ParamSet();
+  ps.targetSystem = target.system; ps.targetComponent = target.component;
+  ps.paramId = id; ps.paramValue = value; ps.paramType = common.MavParamType.REAL32;
+  mavSend(ps);
 }
 
 function doGuidedGoto(lat, lon) {
@@ -421,13 +479,19 @@ function handleClientMessage(raw) {
     case 'mode': if (ROVER_MODES[m.mode] != null) doSetMode(ROVER_MODES[m.mode]); else if (typeof m.mode === 'number') doSetMode(m.mode); break;
     case 'rtl': doSetMode(ROVER_MODES.RTL); break;
     case 'auto': doSetMode(ROVER_MODES.AUTO); break;
+    case 'pause': doSetMode(ROVER_MODES.HOLD); break;
     case 'startMission': cmdLong(common.MavCmd.MISSION_START); doSetMode(ROVER_MODES.AUTO); break;
     case 'estop': doArm(false, true); break;            // emergency: force disarm
     case 'goto': doGuidedGoto(m.lat, m.lon); break;
+    case 'changeSpeed': doChangeSpeed(m.speed); break;
     case 'setHome': cmdLong(common.MavCmd.DO_SET_HOME, { p1: 0, p5: m.lat, p6: m.lon, p7: 0 }); break;
     case 'setCurrent': cmdLong(common.MavCmd.DO_SET_MISSION_CURRENT, { p1: m.seq }); break;
     case 'uploadMission': startUpload(m.items || []); break;
     case 'downloadMission': startDownload(); break;
+    case 'getParams': getParams(m.names || []); break;
+    case 'setParam': setParam(m.id, m.value); break;
+    case 'tlogStart': tlogStart(); break;
+    case 'tlogStop': tlogStop(); break;
     case 'status': sendSnapshot(); break;
     default: break;
   }

@@ -7,6 +7,7 @@
  */
 const { spawn } = require('child_process');
 const dgram = require('dgram');
+const fs = require('fs');
 const path = require('path');
 const { Writable } = require('stream');
 const WebSocket = require('ws');
@@ -36,12 +37,22 @@ function vsend(msg) { send(vehOut, msg, VP); }
 
 const vsplit = new MavLinkPacketSplitter(); const vparse = new MavLinkPacketParser(); vsplit.pipe(vparse);
 veh.on('message', (b) => vsplit.write(b));
-const got = { armCmd: false, setModeAuto: false, missionCount: 0, items: {} };
+const got = { armCmd: false, setModeAuto: false, missionCount: 0, items: {}, changeSpeed: false, paramReq: false, paramSet: null };
 vparse.on('data', (pk) => {
   const id = pk.header.msgid;
   if (id === common.CommandLong.MSG_ID) {
     const m = pk.protocol.data(pk.payload, common.CommandLong);
     if (m.command === common.MavCmd.COMPONENT_ARM_DISARM && m._param1 === 1) { got.armCmd = true; pass('vehicle received ARM (COMMAND_LONG 400, _param1=1)'); }
+    if (m.command === common.MavCmd.DO_CHANGE_SPEED && Math.abs(m._param2 - 2) < 1e-6) { got.changeSpeed = true; pass('vehicle received DO_CHANGE_SPEED (178, _param2=2)'); }
+  } else if (id === common.ParamRequestRead.MSG_ID) {
+    const m = pk.protocol.data(pk.payload, common.ParamRequestRead);
+    got.paramReq = true;
+    const pv = new common.ParamValue(); pv.paramId = String(m.paramId).replace(/\0+$/, '') || 'CRUISE_SPEED';
+    pv.paramValue = 2.5; pv.paramType = common.MavParamType.REAL32; pv.paramCount = 1; pv.paramIndex = 0; vsend(pv);
+  } else if (id === common.ParamSet.MSG_ID) {
+    const m = pk.protocol.data(pk.payload, common.ParamSet);
+    got.paramSet = { id: String(m.paramId).replace(/\0+$/, ''), value: m.paramValue };
+    pass('vehicle received PARAM_SET ' + got.paramSet.id + '=' + got.paramSet.value);
   } else if (id === common.SetMode.MSG_ID) {
     const m = pk.protocol.data(pk.payload, common.SetMode);
     if (m.customMode === 10) { got.setModeAuto = true; pass('vehicle received SET_MODE customMode=10 (AUTO)'); }
@@ -85,10 +96,16 @@ function startClient() {
   ws.on('open', () => {
     ws.send(JSON.stringify({ t: 'connect', transport: 'udp', listen: UDP_PORT }));
     setTimeout(() => { vehHeartbeat(); vehPos(); }, 400);     // vehicle starts talking
+    setInterval(() => { vehHeartbeat(); vehPos(); }, 250);    // keep link + tlog data flowing
+    setTimeout(() => { ws.send(JSON.stringify({ t: 'tlogStart' })); }, 600);
     setTimeout(() => { ws.send(JSON.stringify({ t: 'arm', arm: true })); }, 900);
     setTimeout(() => { ws.send(JSON.stringify({ t: 'mode', mode: 'AUTO' })); }, 1100);
     setTimeout(() => { ws.send(JSON.stringify({ t: 'uploadMission', items: [{ lat: 22.61, lon: 113.91, alt: 0 }] })); }, 1400);
-    setTimeout(evaluate, 3200);
+    setTimeout(() => { ws.send(JSON.stringify({ t: 'changeSpeed', speed: 2 })); }, 1700);
+    setTimeout(() => { ws.send(JSON.stringify({ t: 'getParams', names: ['CRUISE_SPEED'] })); }, 1900);
+    setTimeout(() => { ws.send(JSON.stringify({ t: 'setParam', id: 'WP_SPEED', value: 3 })); }, 2100);
+    setTimeout(() => { ws.send(JSON.stringify({ t: 'tlogStop' })); }, 2700);
+    setTimeout(evaluate, 3400);
   });
   ws.on('message', (d) => { try { wsMsgs.push(JSON.parse(d.toString())); } catch (_) {} });
   ws.on('error', (e) => { fail('ws error: ' + e.message); done(1); });
@@ -109,6 +126,23 @@ function evaluate() {
   const up = wsMsgs.find((m) => m.t === 'mission_uploaded');
   if (up && up.ok) pass('WS got mission_uploaded ok=true (full upload handshake)');
   else fail('mission upload did not complete: ' + JSON.stringify(up));
+
+  if (!got.changeSpeed) fail('vehicle did NOT receive DO_CHANGE_SPEED');
+
+  const pv = wsMsgs.find((m) => m.t === 'param' && m.id === 'CRUISE_SPEED');
+  if (got.paramReq && pv && Math.abs(pv.value - 2.5) < 1e-3) pass('param read round-trip: WS got CRUISE_SPEED=2.5');
+  else fail('param read failed: req=' + got.paramReq + ' wsParam=' + JSON.stringify(pv));
+
+  if (got.paramSet && got.paramSet.id === 'WP_SPEED' && Math.abs(got.paramSet.value - 3) < 1e-6) pass('param write: vehicle got WP_SPEED=3');
+  else fail('param write failed: ' + JSON.stringify(got.paramSet));
+
+  try {
+    const dir = path.join(__dirname, '..', 'logs');
+    const files = fs.readdirSync(dir).filter((f) => f.endsWith('.tlog')).map((f) => ({ f, s: fs.statSync(path.join(dir, f)).size, m: fs.statSync(path.join(dir, f)).mtimeMs }));
+    files.sort((a, b) => b.m - a.m);
+    if (files[0] && files[0].s > 0) pass('.tlog recorded (' + files[0].f + ', ' + files[0].s + ' bytes)');
+    else fail('.tlog not written or empty');
+  } catch (e) { fail('.tlog check error: ' + e.message); }
 
   // mission item geometry check
   const it1 = got.items[1];

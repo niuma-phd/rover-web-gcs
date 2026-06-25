@@ -44,6 +44,7 @@
           <span class="k">航向</span><span class="v" id="tHdg">--°</span>
           <span class="k">GPS定位</span><span class="v" id="tFix">--</span>
           <span class="k">卫星数</span><span class="v" id="tSats">--</span>
+          <span class="k">链路RSSI</span><span class="v" id="tRssi">--</span>
           <span class="k">电压</span><span class="v" id="tVolt">-- V</span>
           <span class="k">电量</span><span class="v" id="tPct">--%</span>
           <span class="k">纬度</span><span class="v" id="tLat">--</span>
@@ -70,6 +71,14 @@
           <button id="btnRtl" class="warn">返航 RTL</button>
           <button id="btnStart" class="primary">启动任务(AUTO)</button>
         </div>
+        <div class="grid-btn" style="margin-bottom:8px">
+          <button id="btnPause" class="warn">暂停 (HOLD)</button>
+          <button id="btnSkip">跳到航点…</button>
+        </div>
+        <div class="row tight" style="margin-bottom:8px">
+          <label class="lbl">速度</label><input id="spd" class="num" type="number" step="0.1" value="1.5">
+          <span class="lbl">m/s</span><button id="btnSpeed">改速</button>
+        </div>
         <button id="btnEstop" class="danger" style="width:100%">⛔ 急停（强制上锁）</button>
       </div>
 
@@ -86,6 +95,32 @@
           <button id="btnDownload">⬇ 下载任务</button>
           <button id="btnStart2" class="primary">▶ 启动</button>
           <button id="btnClear">🗑 清空</button>
+          <button id="btnSaveWp">💾 保存文件</button>
+          <button id="btnLoadWp">📂 读取文件</button>
+        </div>
+        <button id="btnLoadKml" style="width:100%;margin-top:6px">🗺 导入 KML 田块边界</button>
+        <input id="fileWp" type="file" accept=".waypoints,.txt" style="display:none">
+        <input id="fileKml" type="file" accept=".kml" style="display:none">
+      </div>
+
+      <div class="sec">
+        <h3>操作员参数 (APM Rover)</h3>
+        <div class="row tight" style="margin-bottom:6px">
+          <button id="btnParamsRead">读取全部</button>
+          <span class="lbl" id="paramHint">连接后点「读取全部」</span>
+        </div>
+        <div id="paramList"></div>
+      </div>
+
+      <div class="sec">
+        <h3>记录 / 离线地图</h3>
+        <div class="row tight" style="margin-bottom:6px">
+          <button id="btnTlog">⏺ 开始记录(.tlog)</button>
+          <span class="lbl" id="tlogHint">未记录</span>
+        </div>
+        <div class="row tight">
+          <button id="btnCacheMap">⬇ 缓存当前区域</button>
+          <span class="lbl" id="cacheHint"></span>
         </div>
       </div>
 

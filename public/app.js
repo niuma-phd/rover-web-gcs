@@ -134,8 +134,16 @@ function onMsg(m) {
       setText('vGps', fixName(m.fixType) + '/' + m.sats); break;
     case 'sys':
       setText('tVolt', m.battV.toFixed(2) + ' V'); setText('tPct', (m.battPct < 0 ? '--' : m.battPct + '%'));
-      setText('vBatt', m.battV.toFixed(1) + 'V ' + (m.battPct < 0 ? '' : m.battPct + '%')); break;
+      setText('vBatt', m.battV.toFixed(1) + 'V ' + (m.battPct < 0 ? '' : m.battPct + '%'));
+      lowBattCheck(m.battPct); break;
     case 'vfr': if (m.gs != null) setText('tGs', m.gs.toFixed(1) + ' m/s'); break;
+    case 'radio': setText('tRssi', m.rssi + '/' + m.remrssi); break;
+    case 'param': onParam(m); break;
+    case 'tlog':
+      tlogRecording = m.recording;
+      setText('tlogHint', m.recording ? '记录中: ' + m.file : '已保存: ' + (m.file || '--'));
+      const tb = document.getElementById('btnTlog'); tb.textContent = m.recording ? '⏹ 停止记录' : '⏺ 开始记录(.tlog)';
+      tb.classList.toggle('danger', m.recording); break;
     case 'home': updateHome(m.lat, m.lon); logLine('收到 Home 位置', 'sys'); break;
     case 'text': logLine('FC: ' + m.text, sevClass(m.severity)); break;
     case 'ack': logLine('命令ACK: cmd=' + m.command + ' result=' + ackName(m.result), m.result === 0 ? 'info' : 'warn'); break;
@@ -200,7 +208,7 @@ document.getElementById('btnConn').addEventListener('click', () => {
   if (tr === 'udp') cfg.listen = document.getElementById('udpListen').value;
   else if (tr === 'tcp') { cfg.host = document.getElementById('tcpHost').value; cfg.port = document.getElementById('tcpPort').value; }
   else { cfg.path = document.getElementById('serPath').value; cfg.baud = document.getElementById('serBaud').value; }
-  send(cfg); logLine('正在连接 (' + tr + ')…', 'sys');
+  saveSettings(); send(cfg); logLine('正在连接 (' + tr + ')…', 'sys');
 });
 
 document.getElementById('btnArm').addEventListener('click', () => { if (guard()) { send({ t: 'arm', arm: true }); logLine('发送: 解锁', 'info'); } });
@@ -230,5 +238,161 @@ document.getElementById('btnUpload').addEventListener('click', () => {
 });
 document.getElementById('btnDownload').addEventListener('click', () => { if (guard()) { send({ t: 'downloadMission' }); logLine('发送: 下载任务…', 'info'); } });
 document.getElementById('btnClear').addEventListener('click', () => { clearMission(); logLine('已清空本地航点', 'sys'); });
+
+// ----- change speed / pause / skip -----
+document.getElementById('btnPause').addEventListener('click', () => { if (guard()) { send({ t: 'pause' }); logLine('发送: 暂停 (HOLD)', 'info'); } });
+document.getElementById('btnSpeed').addEventListener('click', () => {
+  if (!guard()) return; const s = parseFloat(document.getElementById('spd').value);
+  if (!isFinite(s) || s <= 0) return logLine('速度无效', 'warn');
+  send({ t: 'changeSpeed', speed: s }); logLine('发送: 改速 ' + s + ' m/s', 'info');
+});
+document.getElementById('btnSkip').addEventListener('click', () => {
+  if (!guard()) return; const v = prompt('跳到第几个航点 (seq)?', '1'); if (v === null) return;
+  const seq = parseInt(v, 10); if (!isFinite(seq)) return;
+  send({ t: 'setCurrent', seq }); logLine('发送: 跳到航点 #' + seq, 'info');
+});
+
+// ----- operator parameters (whitelist) -----
+const PARAM_WHITELIST = [
+  ['CRUISE_SPEED', '巡航速度 m/s'], ['WP_SPEED', '任务速度 m/s (0=巡航)'], ['WP_RADIUS', '航点到达半径 m'],
+  ['TURN_MAX_G', '最大转弯 G'], ['FS_GCS_ENABLE', '地面站失联保护'], ['FS_TIMEOUT', '失联超时 s'],
+  ['FS_ACTION', '失效动作'], ['BATT_LOW_VOLT', '低电压阈值 V'],
+];
+const paramInputs = {};
+(function buildParamRows() {
+  const box = document.getElementById('paramList');
+  PARAM_WHITELIST.forEach(([id, label]) => {
+    const row = document.createElement('div'); row.className = 'wp';
+    const n = document.createElement('span'); n.className = 'c'; n.style.flex = '1.4'; n.title = id;
+    n.textContent = label; row.appendChild(n);
+    const inp = document.createElement('input'); inp.className = 'num'; inp.type = 'number'; inp.step = 'any';
+    inp.style.width = '74px'; inp.disabled = true; paramInputs[id] = inp; row.appendChild(inp);
+    const b = document.createElement('button'); b.textContent = '写入'; b.style.padding = '3px 8px';
+    b.addEventListener('click', () => {
+      if (!guard()) return; const val = parseFloat(inp.value);
+      if (!isFinite(val)) return logLine('参数值无效', 'warn');
+      if (!confirm('确认写入 ' + id + ' = ' + val + ' ?')) return;
+      send({ t: 'setParam', id, value: val }); logLine('发送: 设参数 ' + id + '=' + val, 'info');
+    });
+    row.appendChild(b); box.appendChild(row);
+  });
+})();
+function onParam(m) {
+  const inp = paramInputs[m.id]; if (inp) { inp.disabled = false; inp.value = (Math.round(m.value * 1000) / 1000); }
+  setText('paramHint', '已读取 ' + m.id);
+}
+document.getElementById('btnParamsRead').addEventListener('click', () => {
+  if (!guard()) return; send({ t: 'getParams', names: PARAM_WHITELIST.map((p) => p[0]) });
+  setText('paramHint', '读取中…'); logLine('发送: 读取操作员参数', 'info');
+});
+
+// ----- low battery alert -----
+let lowBattAlerted = false;
+function lowBattCheck(pct) {
+  if (pct >= 0 && pct < 20 && !lowBattAlerted) { lowBattAlerted = true; beep(); logLine('⚠ 电量低: ' + pct + '%', 'warn'); }
+  if (pct >= 25) lowBattAlerted = false;
+}
+function beep() {
+  try { const a = new (window.AudioContext || window.webkitAudioContext)(); const o = a.createOscillator(), g = a.createGain();
+    o.connect(g); g.connect(a.destination); o.frequency.value = 880; g.gain.value = 0.12; o.start(); o.stop(a.currentTime + 0.3); } catch (_) {}
+}
+
+// ----- mission file save / load (.waypoints, QGC WPL 110) -----
+document.getElementById('btnSaveWp').addEventListener('click', () => {
+  if (!wps.length) return logLine('无航点可保存', 'warn');
+  const alt = parseFloat(document.getElementById('defAlt').value) || 0;
+  const lines = ['QGC WPL 110'];
+  lines.push([0, 1, 0, 16, 0, 0, 0, 0, wps[0].lat, wps[0].lon, 0, 1].join('\t')); // home placeholder
+  wps.forEach((w, i) => lines.push([i + 1, 0, 3, 16, 0, 0, 0, 0, w.lat, w.lon, alt, 1].join('\t')));
+  const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = 'mission.waypoints'; a.click();
+  logLine('已保存航点文件 (' + wps.length + ' 点)', 'info');
+});
+document.getElementById('btnLoadWp').addEventListener('click', () => document.getElementById('fileWp').click());
+document.getElementById('fileWp').addEventListener('change', (e) => {
+  const f = e.target.files[0]; if (!f) return; const r = new FileReader();
+  r.onload = () => { loadWaypoints(String(r.result)); e.target.value = ''; }; r.readAsText(f);
+});
+function loadWaypoints(text) {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim());
+  if (!/^QGC WPL/.test(lines[0] || '')) return logLine('文件不是 .waypoints 格式', 'err');
+  clearMission();
+  for (let i = 1; i < lines.length; i++) {
+    const c = lines[i].split(/\t/); if (c.length < 11) continue;
+    const seq = +c[0], lat = +c[8], lon = +c[9];
+    if (seq === 0) continue;
+    if (!isFinite(lat) || !isFinite(lon) || (lat === 0 && lon === 0)) continue;
+    addWaypoint(lat, lon);
+  }
+  logLine('已读取航点文件: ' + wps.length + ' 点', 'info');
+  if (wps.length) map.fitBounds(missionLine.getBounds().pad(0.3));
+}
+
+// ----- KML field boundary import -----
+let boundaryLayer = null;
+document.getElementById('btnLoadKml').addEventListener('click', () => document.getElementById('fileKml').click());
+document.getElementById('fileKml').addEventListener('change', (e) => {
+  const f = e.target.files[0]; if (!f) return; const r = new FileReader();
+  r.onload = () => { loadKml(String(r.result)); e.target.value = ''; }; r.readAsText(f);
+});
+function loadKml(text) {
+  let doc; try { doc = new DOMParser().parseFromString(text, 'text/xml'); } catch (_) { return logLine('KML 解析失败', 'err'); }
+  const el = doc.querySelector('Polygon coordinates') || doc.querySelector('LineString coordinates') || doc.querySelector('coordinates');
+  if (!el) return logLine('KML 未找到坐标', 'err');
+  const pts = el.textContent.trim().split(/\s+/).map((s) => s.split(',')).filter((a) => a.length >= 2)
+    .map((a) => [parseFloat(a[1]), parseFloat(a[0])]).filter((p) => isFinite(p[0]) && isFinite(p[1]));
+  if (!pts.length) return logLine('KML 坐标为空', 'err');
+  if (boundaryLayer) map.removeLayer(boundaryLayer);
+  boundaryLayer = L.polygon(pts, { color: '#e0a800', weight: 2, fillOpacity: 0.06, dashArray: '4,4' }).addTo(map);
+  map.fitBounds(boundaryLayer.getBounds().pad(0.2));
+  logLine('已导入 KML 田块边界: ' + pts.length + ' 顶点', 'info');
+}
+
+// ----- tlog recording -----
+let tlogRecording = false;
+document.getElementById('btnTlog').addEventListener('click', () => {
+  if (!linkConnected && !tlogRecording) return logLine('请先连接飞控再记录', 'warn');
+  send({ t: tlogRecording ? 'tlogStop' : 'tlogStart' });
+});
+
+// ----- offline map cache -----
+let currentBase = baseLayers['Bing 道路(中文)'];
+map.on('baselayerchange', (e) => { currentBase = e.layer; });
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+document.getElementById('btnCacheMap').addEventListener('click', async () => {
+  const layer = currentBase; if (!layer || !layer.getTileUrl) return logLine('当前图层不支持缓存', 'warn');
+  const z0 = map.getZoom(), b = map.getBounds(); const urls = [];
+  for (let z = z0; z <= Math.min(z0 + 2, 18); z++) {
+    const nw = map.project(b.getNorthWest(), z).divideBy(256).floor();
+    const se = map.project(b.getSouthEast(), z).divideBy(256).floor();
+    for (let x = nw.x; x <= se.x; x++) for (let y = nw.y; y <= se.y; y++) {
+      try { const u = layer.getTileUrl({ x, y, z }); if (u) urls.push(u); } catch (_) {}
+      if (urls.length > 2000) break;
+    }
+  }
+  setText('cacheHint', '缓存 0/' + urls.length);
+  let done = 0;
+  for (let i = 0; i < urls.length; i += 8) {
+    await Promise.all(urls.slice(i, i + 8).map((u) => fetch(u, { mode: 'no-cors' }).then(() => {}).catch(() => {})));
+    done = Math.min(i + 8, urls.length); setText('cacheHint', '缓存 ' + done + '/' + urls.length);
+  }
+  setText('cacheHint', '✓ 已缓存 ' + urls.length + ' 瓦片'); logLine('离线地图: 已缓存 ' + urls.length + ' 瓦片', 'info');
+});
+
+// ----- settings persistence (connection form) -----
+function saveSettings() {
+  const s = { transport: document.getElementById('transport').value, udpListen: document.getElementById('udpListen').value,
+    tcpHost: document.getElementById('tcpHost').value, tcpPort: document.getElementById('tcpPort').value,
+    serPath: document.getElementById('serPath').value, serBaud: document.getElementById('serBaud').value };
+  try { localStorage.setItem('rover_gcs_conn', JSON.stringify(s)); } catch (_) {}
+}
+(function restoreSettings() {
+  let s; try { s = JSON.parse(localStorage.getItem('rover_gcs_conn') || '{}'); } catch (_) { s = {}; }
+  for (const k of ['transport', 'udpListen', 'tcpHost', 'tcpPort', 'serPath', 'serBaud']) {
+    if (s[k] != null && document.getElementById(k)) document.getElementById(k).value = s[k];
+  }
+  document.getElementById('transport').dispatchEvent(new Event('change'));
+})();
 
 connectWS();

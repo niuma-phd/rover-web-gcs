@@ -108,6 +108,7 @@ document.getElementById('wpList').addEventListener('click', (e) => {
 });
 
 map.on('click', (e) => {
+  if (fenceDrawMode) { addFenceVertex(e.latlng.lat, e.latlng.lng); return; }
   if (e.originalEvent && e.originalEvent.shiftKey) {
     if (!linkConnected) return logLine('未连接，无法 Goto', 'warn');
     send({ t: 'goto', lat: e.latlng.lat, lon: e.latlng.lng });
@@ -147,7 +148,12 @@ function onMsg(m) {
     case 'home': updateHome(m.lat, m.lon); logLine('收到 Home 位置', 'sys'); break;
     case 'text': logLine('FC: ' + m.text, sevClass(m.severity)); break;
     case 'ack': logLine('命令ACK: cmd=' + m.command + ' result=' + ackName(m.result), m.result === 0 ? 'info' : 'warn'); break;
-    case 'mission_uploaded': logLine(m.ok ? '✓ 任务上传成功' : '✗ 任务上传被拒(type=' + m.result + ')', m.ok ? 'info' : 'err'); break;
+    case 'mission_uploaded': { const w = m.fence ? '围栏' : '任务'; logLine(m.ok ? '✓ ' + w + '上传成功' : '✗ ' + w + '上传被拒(type=' + m.result + ')', m.ok ? 'info' : 'err'); break; }
+    case 'fence_status': {
+      const el = document.getElementById('fenceBreach');
+      if (m.breach) { el.textContent = '⚠ 越界!'; el.className = 'v armed'; }
+      else { el.textContent = '正常'; el.className = 'v disarmed'; } break;
+    }
     case 'mission_list': loadDownloadedMission(m.items); break;
     case 'mission_current': setText('tMode', getText('tMode')); break;
     case 'mission_reached': logLine('已到达航点 #' + m.seq, 'info'); break;
@@ -394,5 +400,83 @@ function saveSettings() {
   }
   document.getElementById('transport').dispatchEvent(new Event('change'));
 })();
+
+// ----- geofence -----
+let fenceDrawMode = null, fenceTempPts = [], fenceTempLayer = null;
+const fences = [];
+function startFenceDraw(kind) {
+  if (addMode) document.getElementById('btnAdd').click(); // turn off waypoint add
+  fenceDrawMode = kind; fenceTempPts = [];
+  if (fenceTempLayer) { map.removeLayer(fenceTempLayer); fenceTempLayer = null; }
+  setText('hint', '画' + (kind === 'inc' ? '包含区(keep-in)' : '排除区(keep-out)') + '：点击地图加顶点 → 点「完成」闭合（≥3 点）。');
+  document.getElementById('hint').style.display = '';
+  logLine('围栏绘制: ' + (kind === 'inc' ? '包含区' : '排除区'), 'sys');
+}
+function addFenceVertex(lat, lon) {
+  fenceTempPts.push([lat, lon]);
+  const color = fenceDrawMode === 'exc' ? '#e5484d' : '#2e9e4f';
+  if (fenceTempLayer) map.removeLayer(fenceTempLayer);
+  fenceTempLayer = L.polygon(fenceTempPts, { color, weight: 2, dashArray: '4,4', fillOpacity: 0.05 }).addTo(map);
+}
+function finishFence() {
+  if (!fenceDrawMode) return;
+  if (fenceTempPts.length < 3) return logLine('围栏至少需要 3 个顶点', 'warn');
+  const color = fenceDrawMode === 'exc' ? '#e5484d' : '#2e9e4f';
+  const layer = L.polygon(fenceTempPts.slice(), { color, weight: 2, fillOpacity: 0.08 }).addTo(map);
+  fences.push({ kind: fenceDrawMode, pts: fenceTempPts.slice(), layer });
+  logLine('已添加' + (fenceDrawMode === 'exc' ? '排除' : '包含') + '围栏 (' + fenceTempPts.length + ' 顶点)', 'info');
+  if (fenceTempLayer) { map.removeLayer(fenceTempLayer); fenceTempLayer = null; }
+  fenceTempPts = []; fenceDrawMode = null;
+}
+function clearFences() {
+  fences.forEach((f) => map.removeLayer(f.layer)); fences.length = 0;
+  if (fenceTempLayer) { map.removeLayer(fenceTempLayer); fenceTempLayer = null; }
+  fenceTempPts = []; fenceDrawMode = null; setText('fenceBreach', '--'); logLine('已清空围栏', 'sys');
+}
+document.getElementById('btnFenceInc').addEventListener('click', () => startFenceDraw('inc'));
+document.getElementById('btnFenceExc').addEventListener('click', () => startFenceDraw('exc'));
+document.getElementById('btnFenceDone').addEventListener('click', finishFence);
+document.getElementById('btnFenceClear').addEventListener('click', clearFences);
+document.getElementById('btnFenceUpload').addEventListener('click', () => {
+  if (!guard()) return; if (!fences.length) return logLine('没有围栏可上传', 'warn');
+  send({ t: 'uploadFence', items: fences.map((f) => ({ kind: f.kind, polygon: f.pts })) });
+  logLine('发送: 上传围栏 (' + fences.length + ' 个多边形)', 'info');
+});
+document.getElementById('btnFenceOn').addEventListener('click', () => { if (guard()) { send({ t: 'fenceEnable', on: true }); logLine('发送: 启用围栏', 'info'); } });
+document.getElementById('btnFenceOff').addEventListener('click', () => { if (guard()) { send({ t: 'fenceEnable', on: false }); logLine('发送: 停用围栏', 'info'); } });
+
+// ----- joystick / keyboard manual control -----
+let joyOn = false, joyTimer = null; const keys = {};
+function dz(v) { return Math.abs(v) < 0.08 ? 0 : v; }
+function clamp1(v) { return Math.max(-1, Math.min(1, v)); }
+function joyEnable(on) {
+  joyOn = on; const b = document.getElementById('btnJoy');
+  b.textContent = on ? '⏹ 停止遥控' : '🎮 启用遥控'; b.classList.toggle('danger', on);
+  if (on) {
+    if (linkConnected) send({ t: 'mode', mode: 'MANUAL' });
+    joyTimer = setInterval(joyTick, 66); logLine('遥控开启 (切 MANUAL，请确保已解锁)', 'info');
+  } else {
+    clearInterval(joyTimer); joyTimer = null; Object.keys(keys).forEach((k) => keys[k] = false);
+    if (linkConnected) send({ t: 'rcRelease' }); setText('joySteer', '0.00'); setText('joyThr', '0.00'); logLine('遥控关闭', 'sys');
+  }
+}
+function joyTick() {
+  let steer = 0, throttle = 0;
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  const gp = pads && pads[0];
+  if (gp) { steer = dz(gp.axes[0] || 0); throttle = -dz(gp.axes[1] || 0); }
+  if (keys.a) steer = -1; if (keys.d) steer = 1; if (keys.w) throttle = 1; if (keys.s) throttle = -1;
+  steer = clamp1(steer); throttle = clamp1(throttle);
+  setText('joySteer', steer.toFixed(2)); setText('joyThr', throttle.toFixed(2));
+  if (linkConnected) send({ t: 'rc', steer, throttle });
+}
+document.addEventListener('keydown', (e) => {
+  if (!joyOn) return; const k = (e.key || '').toLowerCase();
+  if (['w', 'a', 's', 'd'].includes(k)) { keys[k] = true; e.preventDefault(); }
+  if (k === ' ' || e.code === 'Space') { if (linkConnected) send({ t: 'estop' }); joyEnable(false); logLine('⛔ 键盘急停', 'err'); e.preventDefault(); }
+});
+document.addEventListener('keyup', (e) => { const k = (e.key || '').toLowerCase(); if (['w', 'a', 's', 'd'].includes(k)) keys[k] = false; });
+document.getElementById('btnJoy').addEventListener('click', () => { if (!joyOn && !linkConnected) return logLine('请先连接飞控', 'warn'); joyEnable(!joyOn); });
+window.addEventListener('gamepadconnected', () => logLine('手柄已连接', 'info'));
 
 connectWS();

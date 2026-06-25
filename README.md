@@ -38,19 +38,35 @@ npm start          # 或: node bridge/server.js
 
 ```bash
 npm run selftest          # 校验 node-mavlink API + heartbeat 编解码闭环
-node bridge/itest.js      # 端到端：假飞控 + 桥接 + WS 客户端，验证遥测/命令/任务上传
+node bridge/itest.js      # 端到端：假飞控 + 桥接 + WS 客户端，验证遥测/命令/任务上传（13/13）
+node sim/simtest.js       # 全场景：解锁→围栏→任务驾驶→越界告警→手柄遥控，验证车辆真的会动（8/8）
 ```
 
-## 4. 用 ArduPilot SITL 仿真测试（推荐，先不上真车）
+## 4. 内置仿真环境（无需 ArduPilot SITL，推荐先在这里试）
 
-SITL 启动 Rover 后，让它把 MAVLink 输出到本机：
+仓库自带一个**行为级 ArduRover 仿真**（`sim/rover-sim.js`）——它通过 UDP 向桥接发送
+真实的 MAVLink 遥测、并对解锁/模式/任务/围栏/RC 遥控做出反应（会在地图上真的开起来），
+方便在没有硬件、也没装 SITL 的情况下完整体验地面站。
+
+```bash
+# 终端 A：启动地面站（桥接 + 页面）
+npm start
+# 终端 B：启动仿真车（默认对接桥接 127.0.0.1:14550）
+node sim/rover-sim.js
+#   可选环境变量：SIM_LAT / SIM_LON 起点，BRIDGE_PORT 桥接端口
+```
+浏览器打开 http://localhost:8080 → 选 **UDP / 监听 14550** → 连接 →
+车辆出现在地图（起点默认深圳附近）。可解锁、压航点上传并「启动任务」看它自动驾驶、
+画地理围栏看越界告警、用「启用遥控」+手柄/键盘手动驾驶。
+
+### 4b. 用真正的 ArduPilot SITL（可选）
+
 ```bash
 # 在 ardupilot 目录：
 sim_vehicle.py -v Rover --out=udp:127.0.0.1:14550
 # 或用 TCP：地面站选 TCP 连 127.0.0.1:5760
 ```
-地面站选 **UDP / 监听 14550**（或 TCP / 5760）→ 连接 → 应能看到车辆出现在地图、遥测刷新；
-可解锁、切 AUTO、压航点并「上传任务」「启动」。
+地面站选 **UDP / 监听 14550**（或 TCP / 5760）→ 连接。
 
 ## 5. 连真实飞控
 
@@ -67,9 +83,12 @@ sim_vehicle.py -v Rover --out=udp:127.0.0.1:14550
 - **遥测**：飞行模式、武装状态、地速、航向、GPS 定位类型/卫星数、链路 RSSI、电压/电量、经纬度；**低电量蜂鸣告警**。
 - **压航点 / 任务文件**：点图加点、拖动微调、删除；上传（完整 MISSION 握手）/ 下载 / 清空；**保存·读取 .waypoints**；**导入 KML 田块边界**。
 - **发命令**：解锁/上锁、设置模式、RTL、启动任务(AUTO)、**急停**、**改速 (DO_CHANGE_SPEED)**、**暂停 (HOLD)**、**跳到航点**、Shift+点图引导前往(Goto)。
+- **地理围栏**：画包含/排除多边形、上传（MAV_MISSION_TYPE_FENCE）、启用/停用（DO_FENCE_ENABLE）、**越界告警**（FENCE_STATUS）。
+- **手柄/键盘遥控**：Gamepad API + 键盘（W/S=油门, A/D=转向, 空格=急停）→ RC_CHANNELS_OVERRIDE，MANUAL 模式应急驾驶/脱困。
 - **操作员参数**：8 项 Rover 安全参数白名单读 / 写（PARAM_REQUEST_READ / PARAM_SET）。
 - **遥测日志**：每会话 .tlog 记录（QGC / Mission Planner 兼容格式，存 `logs/`）。
 - **日志**：飞控 STATUSTEXT（按严重度分色）、命令 ACK、链路事件。
+- **内置仿真**：`sim/rover-sim.js` 行为级 ArduRover 仿真，无硬件即可端到端测试。
 
 ## 目录结构
 
@@ -79,22 +98,25 @@ web-gcs/
 ├── bridge/
 │   ├── server.js     # 桥接 + 静态服务（核心）
 │   ├── selftest.js   # node-mavlink API 自检 + 编解码闭环
-│   └── itest.js      # 端到端集成测试（假飞控）
+│   └── itest.js      # 端到端集成测试（假飞控，13/13）
+├── sim/
+│   ├── rover-sim.js  # 行为级 ArduRover 仿真（UDP MAVLink，会真的开起来）
+│   └── simtest.js    # 全场景测试：围栏/任务/手柄遥控（8/8）
 └── public/
     ├── index.html
-    ├── app.js        # 前端逻辑（WS / 地图 / 航点 / 命令）
+    ├── app.js        # 前端逻辑（WS / 地图 / 航点 / 命令 / 围栏 / 遥控）
     ├── style.css
     └── vendor/leaflet # 本地内置 Leaflet（离线可用）
 ```
 
 ## 桥接 WebSocket 协议（前后端约定，便于二次开发）
 
-浏览器 → 桥接：`{t:'connect'|'disconnect'|'arm'|'mode'|'rtl'|'startMission'|'estop'|'goto'|'setHome'|'setCurrent'|'uploadMission'|'downloadMission'}`
-桥接 → 浏览器：`{t:'link'|'hb'|'pos'|'gps'|'sys'|'vfr'|'text'|'ack'|'home'|'mission_current'|'mission_reached'|'mission_uploaded'|'mission_list'|'log'|'stale'|'snapshot'}`
+浏览器 → 桥接：`{t:'connect'|'disconnect'|'arm'|'mode'|'rtl'|'auto'|'pause'|'startMission'|'estop'|'goto'|'changeSpeed'|'setHome'|'setCurrent'|'uploadMission'|'downloadMission'|'getParams'|'setParam'|'tlogStart'|'tlogStop'|'uploadFence'|'fenceEnable'|'rc'|'rcRelease'}`
+桥接 → 浏览器：`{t:'link'|'hb'|'pos'|'gps'|'sys'|'vfr'|'text'|'ack'|'home'|'mission_current'|'mission_reached'|'mission_uploaded'|'mission_list'|'fence_status'|'param'|'params_done'|'tlog'|'log'|'stale'|'snapshot'}`
 
 ## MVP 范围说明 / 后续
 
 - 飞控固件：按需求只面向 **ArduPilot Rover（APM）**，MAVLink v2。
-- 暂未含（下一批，见 `功能清单.md`）：避障/近距传感器可视化（已暂缓）、地理围栏、作业前检查单、手柄遥控、视频、RTK/NTRIP 配置、桥接 Windows 安装包。
+- 暂未含（下一批，见 `功能清单.md`）：避障/近距传感器可视化（已暂缓）、作业前检查单、圆形围栏、航测覆盖网格、视频、RTK/NTRIP 配置、桥接 Windows 安装包。
 - 中国地图：用 Bing/Google 中文图。注意 Bing/Google 的中国**道路/标注**瓦片为 GCJ-02 偏移、**卫星**瓦片为 WGS-84；当前按既定方案**不做坐标纠偏**（用卫星图时车标与底图对齐，用道路图时可能有偏移）。
 - 已知工程项：前端航点/参数列表部分用 innerHTML 渲染自身数值（非外部输入）；生产化时建议改 DOM 构造或加 CSP。

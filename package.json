@@ -9,7 +9,11 @@
   },
   "scripts": {
     "start": "node bridge/server.js",
-    "selftest": "node bridge/selftest.js"
+    "selftest": "node bridge/selftest.js",
+    "itest": "node bridge/itest.js",
+    "sim": "node sim/rover-sim.js",
+    "simtest": "node sim/simtest.js",
+    "test": "node bridge/selftest.js && node bridge/itest.js && node sim/simtest.js"
   },
   "dependencies": {
     "leaflet": "^1.9.4",

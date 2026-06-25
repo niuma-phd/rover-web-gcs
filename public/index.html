@@ -104,6 +104,35 @@
       </div>
 
       <div class="sec">
+        <h3>地理围栏</h3>
+        <div class="row tight" style="margin-bottom:6px">
+          <button id="btnFenceInc">▰ 画包含区</button>
+          <button id="btnFenceExc">▱ 画排除区</button>
+          <button id="btnFenceDone">✓ 完成</button>
+        </div>
+        <div class="grid-btn">
+          <button id="btnFenceUpload" class="primary">⬆ 上传围栏</button>
+          <button id="btnFenceClear">🗑 清空围栏</button>
+          <button id="btnFenceOn" class="warn">启用围栏</button>
+          <button id="btnFenceOff">停用围栏</button>
+        </div>
+        <div class="row tight" style="margin-top:6px"><span class="lbl">越界状态:</span><span class="v" id="fenceBreach">--</span></div>
+      </div>
+
+      <div class="sec">
+        <h3>手柄 / 键盘遥控</h3>
+        <div class="row tight" style="margin-bottom:6px">
+          <button id="btnJoy">🎮 启用遥控</button>
+          <span class="lbl" id="joyHint">需 MANUAL + 已解锁</span>
+        </div>
+        <div class="row tight">
+          <span class="lbl">转向</span><span class="v" id="joySteer">0.00</span>
+          <span class="lbl" style="margin-left:14px">油门</span><span class="v" id="joyThr">0.00</span>
+        </div>
+        <div class="lbl" style="margin-top:4px">手柄左摇杆；或键盘 W/S=油门, A/D=转向, 空格=急停</div>
+      </div>
+
+      <div class="sec">
         <h3>操作员参数 (APM Rover)</h3>
         <div class="row tight" style="margin-bottom:6px">
           <button id="btnParamsRead">读取全部</button>

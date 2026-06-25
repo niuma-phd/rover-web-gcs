@@ -277,6 +277,10 @@ function onPacket(packet) {
       broadcast({ t: 'param', id: String(m.paramId).replace(/\0+$/, ''), value: m.paramValue, ptype: m.paramType, index: m.paramIndex, count: m.paramCount });
       break;
     }
+    case common.FenceStatus.MSG_ID: {
+      broadcast({ t: 'fence_status', breach: m.breachStatus, btype: m.breachType, count: m.breachCount });
+      break;
+    }
     case common.StatusText.MSG_ID: {
       broadcast({ t: 'text', severity: m.severity, text: String(m.text || '').replace(/ +$/,'') });
       break;
@@ -329,8 +333,9 @@ function onPacket(packet) {
     case common.MissionAck.MSG_ID: {
       if (upload) {
         const accepted = (m.type === 0); // MAV_MISSION_ACCEPTED = 0
-        log('mission upload ' + (accepted ? 'ACCEPTED' : 'REJECTED type=' + m.type));
-        broadcast({ t: 'mission_uploaded', ok: accepted, result: m.type });
+        const isFence = upload.missionType === common.MavMissionType.FENCE;
+        log((isFence ? 'fence' : 'mission') + ' upload ' + (accepted ? 'ACCEPTED' : 'REJECTED type=' + m.type));
+        broadcast({ t: 'mission_uploaded', ok: accepted, result: m.type, fence: isFence });
         upload = null;
       }
       break;
@@ -397,23 +402,39 @@ function doGuidedGoto(lat, lon) {
   mavSend(sp);
 }
 
-// ---- mission upload ----
+// ---- generic mission / fence upload (MISSION protocol with mission_type) ----
+function beginUpload(missionType, specs, label) {
+  upload = { missionType, items: specs };
+  const count = new common.MissionCount();
+  count.targetSystem = target.system; count.targetComponent = target.component;
+  count.count = specs.length; count.missionType = missionType;
+  log(label + ': sending count=' + specs.length);
+  mavSend(count);
+}
+
 function startUpload(items) {
   // items: [{lat, lon, alt}]  -> seq 0 = home placeholder, seq 1..N = NAV_WAYPOINT
   const home = vehicle.home || (items[0] ? { lat: items[0].lat, lon: items[0].lon } : { lat: 0, lon: 0 });
-  const full = [];
-  full.push({ frame: common.MavFrame.GLOBAL, command: common.MavCmd.NAV_WAYPOINT,
-    lat: home.lat, lon: home.lon, alt: 0 });            // seq 0 (home, vehicle overwrites)
-  for (const w of items) {
-    full.push({ frame: common.MavFrame.GLOBAL_RELATIVE_ALT, command: common.MavCmd.NAV_WAYPOINT,
-      lat: w.lat, lon: w.lon, alt: w.alt || 0 });
+  const specs = [];
+  specs.push({ frame: common.MavFrame.GLOBAL, command: common.MavCmd.NAV_WAYPOINT, lat: home.lat, lon: home.lon, alt: 0 });
+  for (const w of items) specs.push({ frame: common.MavFrame.GLOBAL_RELATIVE_ALT, command: common.MavCmd.NAV_WAYPOINT, lat: w.lat, lon: w.lon, alt: w.alt || 0 });
+  beginUpload(common.MavMissionType.MISSION, specs, 'mission upload');
+}
+
+function startFenceUpload(items) {
+  // items: [{kind:'inc'|'exc', polygon:[[lat,lon],...]} | {kind:'circInc'|'circExc', lat, lon, radius}]
+  const specs = [];
+  for (const f of items) {
+    if (f.kind === 'circInc' || f.kind === 'circExc') {
+      specs.push({ frame: common.MavFrame.GLOBAL, lat: f.lat, lon: f.lon, alt: 0, p1: f.radius || 10,
+        command: f.kind === 'circInc' ? common.MavCmd.NAV_FENCE_CIRCLE_INCLUSION : common.MavCmd.NAV_FENCE_CIRCLE_EXCLUSION });
+    } else if (f.polygon && f.polygon.length >= 3) {
+      const cmd = f.kind === 'exc' ? common.MavCmd.NAV_FENCE_POLYGON_VERTEX_EXCLUSION : common.MavCmd.NAV_FENCE_POLYGON_VERTEX_INCLUSION;
+      for (const v of f.polygon) specs.push({ frame: common.MavFrame.GLOBAL, command: cmd, lat: v[0], lon: v[1], alt: 0, p1: f.polygon.length });
+    }
   }
-  upload = { items: full };
-  const count = new common.MissionCount();
-  count.targetSystem = target.system; count.targetComponent = target.component;
-  count.count = full.length; count.missionType = common.MavMissionType.MISSION;
-  log('mission upload: sending count=' + full.length);
-  mavSend(count);
+  if (!specs.length) { log('fence upload: no valid items'); broadcast({ t: 'mission_uploaded', ok: false, fence: true, result: -1 }); return; }
+  beginUpload(common.MavMissionType.FENCE, specs, 'fence upload');
 }
 
 function sendMissionItem(seq) {
@@ -423,10 +444,28 @@ function sendMissionItem(seq) {
   it.targetSystem = target.system; it.targetComponent = target.component;
   it.seq = seq; it.frame = w.frame; it.command = w.command;
   it.current = seq === 0 ? 1 : 0; it.autocontinue = 1;
-  it.param1 = 0; it.param2 = 0; it.param3 = 0; it.param4 = 0;
+  it.param1 = w.p1 || 0; it.param2 = w.p2 || 0; it.param3 = w.p3 || 0; it.param4 = w.p4 || 0;
   it.x = Math.round(w.lat * 1e7); it.y = Math.round(w.lon * 1e7); it.z = w.alt || 0;
-  it.missionType = common.MavMissionType.MISSION;
+  it.missionType = upload.missionType;
   mavSend(it);
+}
+
+function fenceEnable(on) { cmdLong(common.MavCmd.DO_FENCE_ENABLE, { p1: on ? 1 : 0 }); }
+
+function rcOverride(steer, throttle) {
+  // steer/throttle in -1..1 -> RC channels (ArduRover ch1=steering, ch3=throttle). 0 = release a channel.
+  const o = new common.RcChannelsOverride();
+  o.targetSystem = target.system; o.targetComponent = target.component;
+  const us = (v) => Math.max(1100, Math.min(1900, Math.round(1500 + v * 400)));
+  o.chan1Raw = us(steer); o.chan2Raw = 0; o.chan3Raw = us(throttle);
+  o.chan4Raw = 0; o.chan5Raw = 0; o.chan6Raw = 0; o.chan7Raw = 0; o.chan8Raw = 0;
+  mavSend(o);
+}
+function rcRelease() {
+  const o = new common.RcChannelsOverride();
+  o.targetSystem = target.system; o.targetComponent = target.component;
+  for (let i = 1; i <= 8; i++) o['chan' + i + 'Raw'] = 0; // 0 = give channels back to RC/vehicle
+  mavSend(o);
 }
 
 // ---- mission download ----
@@ -490,6 +529,10 @@ function handleClientMessage(raw) {
     case 'downloadMission': startDownload(); break;
     case 'getParams': getParams(m.names || []); break;
     case 'setParam': setParam(m.id, m.value); break;
+    case 'uploadFence': startFenceUpload(m.items || []); break;
+    case 'fenceEnable': fenceEnable(!!m.on); break;
+    case 'rc': rcOverride(m.steer || 0, m.throttle || 0); break;
+    case 'rcRelease': rcRelease(); break;
     case 'tlogStart': tlogStart(); break;
     case 'tlogStop': tlogStop(); break;
     case 'status': sendSnapshot(); break;

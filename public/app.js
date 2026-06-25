@@ -72,7 +72,40 @@ function updateHome(lat, lon) {
 // ----------------------------------------------------------------------------
 // Mission (waypoints)
 // ----------------------------------------------------------------------------
-let addMode = false;
+// Map interaction modes — exactly one active at a time (QGC-style explicit tool)
+// ----------------------------------------------------------------------------
+let mapMode = null; // 'plan' | 'goto' | 'fenceInc' | 'fenceExc' | null
+const MODE_INFO = {
+  plan:     { btn: 'btnAdd',      cls: 'm-plan',  txt: '✏️ 规划航点：点击地图依次添加航点 · 拖动微调 · ✕ 删除 · 完成后点「⬆ 上传任务」' },
+  goto:     { btn: 'btnGoto',     cls: 'm-goto',  txt: '🎯 去这里：点击地图，车辆立即前往该点 (GUIDED)' },
+  fenceInc: { btn: 'btnFenceInc', cls: 'm-fence', txt: '▰ 画包含区(keep-in)：点击地图加顶点 → 点「✓ 完成」闭合（≥3 点）' },
+  fenceExc: { btn: 'btnFenceExc', cls: 'm-fence', txt: '▱ 画排除区(keep-out)：点击地图加顶点 → 点「✓ 完成」闭合（≥3 点）' },
+};
+function setMapMode(mode) {
+  if (mode === mapMode) mode = null;                 // clicking the active tool exits it
+  if (mapMode && mapMode.indexOf('fence') === 0 && mode !== mapMode) cancelFenceDraw(); // discard half-drawn fence
+  mapMode = mode;
+  Object.values(MODE_INFO).forEach((i) => { const b = document.getElementById(i.btn); if (b) b.classList.remove('active'); });
+  const banner = document.getElementById('mapMode'), mapEl = document.getElementById('map');
+  if (mapMode && MODE_INFO[mapMode]) {
+    const info = MODE_INFO[mapMode];
+    const b = document.getElementById(info.btn); if (b) b.classList.add('active');
+    document.getElementById('mapModeText').textContent = info.txt;
+    banner.className = 'mapmode ' + info.cls;
+    mapEl.classList.add('crosshair');
+    if (mapMode.indexOf('fence') === 0) beginFenceDraw();
+  } else {
+    banner.className = 'mapmode hidden';
+    mapEl.classList.remove('crosshair');
+  }
+}
+
+// ----- mission lifecycle status pill -----
+const MSTATE = { none: '未规划', plan: '规划中', uploaded: '已上传', running: '执行中', done: '已完成' };
+function setMissionState(s) { const el = document.getElementById('missionState'); if (el) { el.textContent = MSTATE[s] || s; el.className = 'mst mst-' + s; } }
+function getMissionState() { const el = document.getElementById('missionState'); return el ? el.className.replace(/^mst mst-/, '') : 'none'; }
+function markPlanDirty() { setMissionState(wps.length ? 'plan' : 'none'); } // local edit ⇒ no longer matches vehicle
+
 const wps = [];                 // {lat, lon, marker}
 const missionLine = L.polyline([], { color: '#2e9e4f', weight: 2, dashArray: '6,6' }).addTo(map);
 
@@ -86,29 +119,33 @@ function redrawMission() {
     row.innerHTML = '<span class="n">' + (i + 1) + '</span><span class="c">' + w.lat.toFixed(6) + ', ' + w.lon.toFixed(6) + '</span><span class="x" data-i="' + i + '">✕</span>';
     list.appendChild(row);
   });
+  setText('wpCount', wps.length);
 }
 function addWaypoint(lat, lon) {
   const w = { lat, lon };
   w.marker = L.marker([lat, lon], { icon: wpIcon(wps.length + 1), draggable: true }).addTo(map);
-  w.marker.on('drag', (e) => { const p = e.target.getLatLng(); w.lat = p.lat; w.lon = p.lng; redrawMission(); });
+  w.marker.on('drag', (e) => { const p = e.target.getLatLng(); w.lat = p.lat; w.lon = p.lng; redrawMission(); markPlanDirty(); });
   wps.push(w); redrawMission();
 }
 function clearMission() { wps.forEach((w) => w.marker && map.removeLayer(w.marker)); wps.length = 0; redrawMission(); }
 document.getElementById('wpList').addEventListener('click', (e) => {
   const i = e.target.getAttribute && e.target.getAttribute('data-i');
-  if (i !== null && i !== undefined) { const idx = +i; if (wps[idx]) { map.removeLayer(wps[idx].marker); wps.splice(idx, 1); redrawMission(); } }
+  if (i !== null && i !== undefined) { const idx = +i; if (wps[idx]) { map.removeLayer(wps[idx].marker); wps.splice(idx, 1); redrawMission(); markPlanDirty(); } }
 });
 
+function doGoto(lat, lon) {
+  if (!linkConnected) return logLine('未连接，无法前往', 'warn');
+  send({ t: 'goto', lat, lon });
+  logLine('🎯 引导前往 ' + lat.toFixed(6) + ', ' + lon.toFixed(6), 'info');
+}
 map.on('click', (e) => {
-  if (fenceDrawMode) { addFenceVertex(e.latlng.lat, e.latlng.lng); return; }
-  if (e.originalEvent && e.originalEvent.shiftKey) {
-    if (!linkConnected) return logLine('未连接，无法 Goto', 'warn');
-    send({ t: 'goto', lat: e.latlng.lat, lon: e.latlng.lng });
-    logLine('引导前往 ' + e.latlng.lat.toFixed(6) + ', ' + e.latlng.lng.toFixed(6), 'info');
-    return;
-  }
-  if (addMode) addWaypoint(e.latlng.lat, e.latlng.lng);
+  const lat = e.latlng.lat, lon = e.latlng.lng;
+  if (mapMode === 'plan') { addWaypoint(lat, lon); logLine('航点 #' + wps.length + ': ' + lat.toFixed(6) + ', ' + lon.toFixed(6), 'sys'); markPlanDirty(); return; }
+  if (mapMode === 'goto') { doGoto(lat, lon); return; }
+  if (mapMode === 'fenceInc' || mapMode === 'fenceExc') { addFenceVertex(lat, lon); return; }
+  if (e.originalEvent && e.originalEvent.shiftKey) doGoto(lat, lon); // power-user shortcut when no tool is active
 });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && mapMode) setMapMode(null); });
 
 // ----------------------------------------------------------------------------
 // Incoming messages
@@ -138,9 +175,9 @@ function onMsg(m) {
       const tb = document.getElementById('btnTlog'); tb.textContent = m.recording ? '⏹ 停止记录' : '⏺ 开始记录(.tlog)';
       tb.classList.toggle('danger', m.recording); break;
     case 'home': updateHome(m.lat, m.lon); logLine('收到 Home 位置', 'sys'); break;
-    case 'text': logLine('FC: ' + m.text, sevClass(m.severity)); break;
+    case 'text': logLine('FC: ' + m.text, sevClass(m.severity)); if (/mission complete/i.test(m.text)) setMissionState('done'); break;
     case 'ack': logLine('命令ACK: cmd=' + m.command + ' result=' + ackName(m.result), m.result === 0 ? 'info' : 'warn'); break;
-    case 'mission_uploaded': { const w = m.fence ? '围栏' : '任务'; logLine(m.ok ? '✓ ' + w + '上传成功' : '✗ ' + w + '上传被拒(type=' + m.result + ')', m.ok ? 'info' : 'err'); break; }
+    case 'mission_uploaded': { const w = m.fence ? '围栏' : '任务'; logLine(m.ok ? '✓ ' + w + '上传成功' : '✗ ' + w + '上传被拒(type=' + m.result + ')', m.ok ? 'info' : 'err'); if (m.ok && !m.fence) setMissionState('uploaded'); break; }
     case 'fence_status': {
       const el = document.getElementById('fenceBreach');
       if (m.breach) { el.textContent = '⚠ 越界!'; el.className = 'v armed'; }
@@ -159,6 +196,7 @@ function loadDownloadedMission(items) {
   clearMission();
   items.forEach((it) => addWaypoint(it.lat, it.lon));
   logLine('已下载任务: ' + items.length + ' 个航点', 'info');
+  setMissionState(items.length ? 'uploaded' : 'none'); // came from the vehicle ⇒ in sync
   if (items.length) map.fitBounds(missionLine.getBounds().pad(0.3));
 }
 
@@ -167,11 +205,14 @@ function loadDownloadedMission(items) {
 // ----------------------------------------------------------------------------
 function setText(id, v) { const el = document.getElementById(id); if (el) el.textContent = v; }
 function getText(id) { const el = document.getElementById(id); return el ? el.textContent : ''; }
-function setMode(name) { setText('tMode', name || '--'); setText('vMode', name || '--'); }
+function setMode(name) {
+  setText('tMode', name || '--'); setText('vMode', name || '--');
+  if (name === 'AUTO') setMissionState('running');
+  else if (getMissionState() === 'running') setMissionState('uploaded'); // paused/changed out of AUTO, mission still loaded
+}
 function setArmed(armed) {
-  const t = armed ? '已武装' : '已上锁', cls = armed ? 'armed' : 'disarmed';
-  const a = document.getElementById('tArmed'); a.textContent = t; a.className = 'v ' + cls;
-  const b = document.getElementById('vArmed'); b.textContent = armed ? 'ARMED' : 'SAFE'; b.className = cls;
+  const cls = armed ? 'armed' : 'disarmed';
+  const a = document.getElementById('tArmed'); if (a) { a.textContent = armed ? '已武装' : '已上锁'; a.className = 'inst-val ' + cls; }
 }
 function setLink(on) {
   linkConnected = on;
@@ -213,7 +254,6 @@ document.getElementById('btnArm').addEventListener('click', () => { if (guard())
 document.getElementById('btnDisarm').addEventListener('click', () => { if (guard()) { send({ t: 'arm', arm: false }); logLine('发送: 上锁', 'info'); } });
 document.getElementById('btnSetMode').addEventListener('click', () => { if (guard()) { const mode = document.getElementById('modeSel').value; send({ t: 'mode', mode }); logLine('发送: 模式 ' + mode, 'info'); } });
 document.getElementById('btnRtl').addEventListener('click', () => { if (guard()) { send({ t: 'rtl' }); logLine('发送: 返航 RTL', 'info'); } });
-document.getElementById('btnStart').addEventListener('click', startMission);
 document.getElementById('btnStart2').addEventListener('click', startMission);
 function startMission() { if (guard()) { send({ t: 'startMission' }); logLine('发送: 启动任务 (AUTO)', 'info'); } }
 document.getElementById('btnEstop').addEventListener('click', () => {
@@ -221,21 +261,17 @@ document.getElementById('btnEstop').addEventListener('click', () => {
   if (confirm('确认急停？将强制上锁（电机立即停止）。')) { send({ t: 'estop' }); logLine('⛔ 发送: 急停 (强制上锁)', 'err'); }
 });
 
-document.getElementById('btnAdd').addEventListener('click', (e) => {
-  addMode = !addMode; e.target.classList.toggle('addmode', addMode);
-  e.target.textContent = addMode ? '✓ 点击地图压点' : '✏️ 添加航点';
-  document.getElementById('hint').textContent = addMode ? '添加航点模式：点击地图压点，拖动可微调，✕ 删除。完成后点「上传任务」。' :
-    '提示：开启「添加航点」后点击地图压点；Shift+点击地图 = 引导前往(Guided Goto)。';
-});
+document.getElementById('btnAdd').addEventListener('click', () => setMapMode('plan'));
+document.getElementById('btnGoto').addEventListener('click', () => setMapMode('goto'));
+document.getElementById('btnModeExit').addEventListener('click', () => setMapMode(null));
 document.getElementById('btnUpload').addEventListener('click', () => {
   if (!guard()) return;
   if (!wps.length) return logLine('没有航点可上传', 'warn');
-  const alt = parseFloat(document.getElementById('defAlt').value) || 0;
-  send({ t: 'uploadMission', items: wps.map((w) => ({ lat: w.lat, lon: w.lon, alt })) });
+  send({ t: 'uploadMission', items: wps.map((w) => ({ lat: w.lat, lon: w.lon, alt: 0 })) }); // rover ignores altitude
   logLine('发送: 上传 ' + wps.length + ' 个航点…', 'info');
 });
 document.getElementById('btnDownload').addEventListener('click', () => { if (guard()) { send({ t: 'downloadMission' }); logLine('发送: 下载任务…', 'info'); } });
-document.getElementById('btnClear').addEventListener('click', () => { clearMission(); logLine('已清空本地航点', 'sys'); });
+document.getElementById('btnClear').addEventListener('click', () => { clearMission(); setMissionState('none'); logLine('已清空本地航点', 'sys'); });
 
 // ----- change speed / pause / skip -----
 document.getElementById('btnPause').addEventListener('click', () => { if (guard()) { send({ t: 'pause' }); logLine('发送: 暂停 (HOLD)', 'info'); } });
@@ -298,7 +334,7 @@ function beep() {
 // ----- mission file save / load (.waypoints, QGC WPL 110) -----
 document.getElementById('btnSaveWp').addEventListener('click', () => {
   if (!wps.length) return logLine('无航点可保存', 'warn');
-  const alt = parseFloat(document.getElementById('defAlt').value) || 0;
+  const alt = 0; // rover ignores altitude
   const lines = ['QGC WPL 110'];
   lines.push([0, 1, 0, 16, 0, 0, 0, 0, wps[0].lat, wps[0].lon, 0, 1].join('\t')); // home placeholder
   wps.forEach((w, i) => lines.push([i + 1, 0, 3, 16, 0, 0, 0, 0, w.lat, w.lon, alt, 1].join('\t')));
@@ -324,6 +360,7 @@ function loadWaypoints(text) {
     addWaypoint(lat, lon);
   }
   logLine('已读取航点文件: ' + wps.length + ' 点', 'info');
+  markPlanDirty(); // loaded locally, not yet uploaded to the vehicle
   if (wps.length) map.fitBounds(missionLine.getBounds().pad(0.3));
 }
 
@@ -393,40 +430,42 @@ function saveSettings() {
   document.getElementById('transport').dispatchEvent(new Event('change'));
 })();
 
-// ----- geofence -----
-let fenceDrawMode = null, fenceTempPts = [], fenceTempLayer = null;
+// ----- geofence (uses the shared mapMode state machine) -----
+let fenceTempPts = [], fenceTempLayer = null;
 const fences = [];
-function startFenceDraw(kind) {
-  if (addMode) document.getElementById('btnAdd').click(); // turn off waypoint add
-  fenceDrawMode = kind; fenceTempPts = [];
+function beginFenceDraw() {
+  fenceTempPts = [];
   if (fenceTempLayer) { map.removeLayer(fenceTempLayer); fenceTempLayer = null; }
-  setText('hint', '画' + (kind === 'inc' ? '包含区(keep-in)' : '排除区(keep-out)') + '：点击地图加顶点 → 点「完成」闭合（≥3 点）。');
-  document.getElementById('hint').style.display = '';
-  logLine('围栏绘制: ' + (kind === 'inc' ? '包含区' : '排除区'), 'sys');
+  logLine('围栏绘制: ' + (mapMode === 'fenceExc' ? '排除区' : '包含区'), 'sys');
+}
+function cancelFenceDraw() {
+  if (fenceTempLayer) { map.removeLayer(fenceTempLayer); fenceTempLayer = null; }
+  fenceTempPts = [];
 }
 function addFenceVertex(lat, lon) {
   fenceTempPts.push([lat, lon]);
-  const color = fenceDrawMode === 'exc' ? '#e5484d' : '#2e9e4f';
+  const color = mapMode === 'fenceExc' ? '#e5484d' : '#2e9e4f';
   if (fenceTempLayer) map.removeLayer(fenceTempLayer);
   fenceTempLayer = L.polygon(fenceTempPts, { color, weight: 2, dashArray: '4,4', fillOpacity: 0.05 }).addTo(map);
 }
 function finishFence() {
-  if (!fenceDrawMode) return;
+  if (mapMode !== 'fenceInc' && mapMode !== 'fenceExc') return logLine('请先点「画包含区 / 画排除区」', 'warn');
   if (fenceTempPts.length < 3) return logLine('围栏至少需要 3 个顶点', 'warn');
-  const color = fenceDrawMode === 'exc' ? '#e5484d' : '#2e9e4f';
+  const exc = mapMode === 'fenceExc', color = exc ? '#e5484d' : '#2e9e4f';
   const layer = L.polygon(fenceTempPts.slice(), { color, weight: 2, fillOpacity: 0.08 }).addTo(map);
-  fences.push({ kind: fenceDrawMode, pts: fenceTempPts.slice(), layer });
-  logLine('已添加' + (fenceDrawMode === 'exc' ? '排除' : '包含') + '围栏 (' + fenceTempPts.length + ' 顶点)', 'info');
-  if (fenceTempLayer) { map.removeLayer(fenceTempLayer); fenceTempLayer = null; }
-  fenceTempPts = []; fenceDrawMode = null;
+  fences.push({ kind: exc ? 'exc' : 'inc', pts: fenceTempPts.slice(), layer });
+  logLine('已添加' + (exc ? '排除' : '包含') + '围栏 (' + fenceTempPts.length + ' 顶点)', 'info');
+  fenceTempPts = []; if (fenceTempLayer) { map.removeLayer(fenceTempLayer); fenceTempLayer = null; }
+  setMapMode(null);
 }
 function clearFences() {
   fences.forEach((f) => map.removeLayer(f.layer)); fences.length = 0;
-  if (fenceTempLayer) { map.removeLayer(fenceTempLayer); fenceTempLayer = null; }
-  fenceTempPts = []; fenceDrawMode = null; setText('fenceBreach', '--'); logLine('已清空围栏', 'sys');
+  cancelFenceDraw();
+  if (mapMode && mapMode.indexOf('fence') === 0) setMapMode(null);
+  setText('fenceBreach', '--'); logLine('已清空围栏', 'sys');
 }
-document.getElementById('btnFenceInc').addEventListener('click', () => startFenceDraw('inc'));
-document.getElementById('btnFenceExc').addEventListener('click', () => startFenceDraw('exc'));
+document.getElementById('btnFenceInc').addEventListener('click', () => setMapMode('fenceInc'));
+document.getElementById('btnFenceExc').addEventListener('click', () => setMapMode('fenceExc'));
 document.getElementById('btnFenceDone').addEventListener('click', finishFence);
 document.getElementById('btnFenceClear').addEventListener('click', clearFences);
 document.getElementById('btnFenceUpload').addEventListener('click', () => {
@@ -470,5 +509,8 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener('keyup', (e) => { const k = (e.key || '').toLowerCase(); if (['w', 'a', 's', 'd'].includes(k)) keys[k] = false; });
 document.getElementById('btnJoy').addEventListener('click', () => { if (!joyOn && !linkConnected) return logLine('请先连接飞控', 'warn'); joyEnable(!joyOn); });
 window.addEventListener('gamepadconnected', () => logLine('手柄已连接', 'info'));
+
+// ----- collapsible panel sections -----
+document.querySelectorAll('.card-h').forEach((h) => h.addEventListener('click', () => h.parentElement.classList.toggle('open')));
 
 connectWS();

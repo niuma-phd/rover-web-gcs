@@ -3,14 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>无人车地面站 (MVP)</title>
+<title>无人车地面站</title>
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div class="app">
   <header>
-    <div class="logo">🚜 无人车地面站 <small>MVP</small></div>
+    <div class="brand"><span class="ic">🚜</span><span>无人车地面站</span><small>Rover GCS</small></div>
     <div class="conn">
       <select id="transport">
         <option value="udp">UDP</option>
@@ -23,140 +23,141 @@
       <button id="btnConn" class="primary">连接</button>
     </div>
     <div class="spacer"></div>
-    <span class="badge"><span id="linkDot" class="dot"></span><span id="linkText">未连接</span></span>
-    <span class="badge">模式 <b id="vMode">--</b></span>
-    <span class="badge" id="vArmedBadge">武装 <b id="vArmed" class="disarmed">--</b></span>
-    <span class="badge">GPS <b id="vGps">--</b></span>
-    <span class="badge">电池 <b id="vBatt">--</b></span>
+    <div class="link-stat"><span id="linkDot" class="dot"></span><span id="linkText">未连接</span></div>
   </header>
+
+  <!-- instrument toolbar (primary telemetry) -->
+  <div class="instruments" id="instruments">
+    <div class="inst"><div class="inst-val" id="tMode">--</div><div class="inst-lbl">飞行模式</div></div>
+    <div class="inst"><div class="inst-val disarmed" id="tArmed">--</div><div class="inst-lbl">武装状态</div></div>
+    <div class="inst"><div class="inst-val" id="tGs">-- m/s</div><div class="inst-lbl">地速</div></div>
+    <div class="inst"><div class="inst-val" id="tHdg">--°</div><div class="inst-lbl">航向</div></div>
+    <div class="inst"><div class="inst-val" id="tFix">--</div><div class="inst-lbl">GPS · <span id="tSats">--</span> 星</div></div>
+    <div class="inst"><div class="inst-val" id="tVolt">-- V</div><div class="inst-lbl">电池 · <span id="tPct">--%</span></div></div>
+    <div class="inst"><div class="inst-val" id="tRssi">--</div><div class="inst-lbl">链路 RSSI</div></div>
+  </div>
 
   <div class="body">
     <div id="map"></div>
-    <div class="hint" id="hint">提示：先选链路并「连接」。开启「添加航点」后点击地图压点；Shift+点击地图 = 引导前往(Guided Goto)。</div>
+    <div class="mapmode hidden" id="mapMode"><span id="mapModeText"></span><button id="btnModeExit">✕ 退出 (Esc)</button></div>
+    <div class="hint" id="hint">提示：先选链路并「连接」。在「任务 / 航点」里点「✏️ 规划航点」开始压点；点「🎯 去这里」让车辆即时前往。</div>
+    <div class="coords" id="coords">纬度 <b id="tLat">--</b> · 经度 <b id="tLon">--</b></div>
 
     <div class="panel">
-      <div class="sec">
-        <h3>遥测</h3>
-        <div class="tel">
-          <span class="k">飞行模式</span><span class="v" id="tMode">--</span>
-          <span class="k">武装状态</span><span class="v" id="tArmed">--</span>
-          <span class="k">地速</span><span class="v" id="tGs">-- m/s</span>
-          <span class="k">航向</span><span class="v" id="tHdg">--°</span>
-          <span class="k">GPS定位</span><span class="v" id="tFix">--</span>
-          <span class="k">卫星数</span><span class="v" id="tSats">--</span>
-          <span class="k">链路RSSI</span><span class="v" id="tRssi">--</span>
-          <span class="k">电压</span><span class="v" id="tVolt">-- V</span>
-          <span class="k">电量</span><span class="v" id="tPct">--%</span>
-          <span class="k">纬度</span><span class="v" id="tLat">--</span>
-          <span class="k">经度</span><span class="v" id="tLon">--</span>
+      <section class="card open">
+        <button class="card-h" type="button">控制指令 <span class="chev">▸</span></button>
+        <div class="card-b">
+          <div class="grid-btn" style="margin-bottom:8px">
+            <button id="btnArm" class="primary">解锁 Arm</button>
+            <button id="btnDisarm">上锁 Disarm</button>
+          </div>
+          <div class="row tight" style="margin-bottom:8px">
+            <label class="lbl">模式</label>
+            <select id="modeSel" class="mode">
+              <option>MANUAL</option><option>HOLD</option><option>AUTO</option>
+              <option>GUIDED</option><option>RTL</option><option>SMART_RTL</option>
+              <option>STEERING</option><option>LOITER</option><option>ACRO</option><option>FOLLOW</option>
+            </select>
+            <button id="btnSetMode">设置</button>
+          </div>
+          <button id="btnRtl" class="warn" style="width:100%;margin-bottom:8px">返航 RTL</button>
+          <div class="row tight" style="margin-bottom:8px">
+            <label class="lbl">速度</label><input id="spd" class="num" type="number" step="0.1" value="1.5">
+            <span class="lbl">m/s</span><button id="btnSpeed">改速</button>
+          </div>
+          <button id="btnEstop" class="danger" style="width:100%">⛔ 急停（强制上锁）</button>
         </div>
-      </div>
+      </section>
 
-      <div class="sec">
-        <h3>控制指令</h3>
-        <div class="grid-btn" style="margin-bottom:8px">
-          <button id="btnArm" class="primary">解锁 Arm</button>
-          <button id="btnDisarm">上锁 Disarm</button>
+      <section class="card open">
+        <button class="card-h" type="button">任务 / 航点 <span class="chev">▸</span></button>
+        <div class="card-b">
+          <div class="mstat">任务 <b id="wpCount">0</b> 个航点 · <span id="missionState" class="mst mst-none">未规划</span></div>
+          <div class="grid-btn" style="margin-bottom:8px">
+            <button id="btnAdd">✏️ 规划航点</button>
+            <button id="btnGoto" class="warn">🎯 去这里</button>
+          </div>
+          <div class="wps" id="wpList"></div>
+          <div class="grid-btn" style="margin-top:8px">
+            <button id="btnUpload" class="primary">⬆ 上传任务</button>
+            <button id="btnStart2" class="primary">▶ 启动</button>
+            <button id="btnPause" class="warn">⏸ 暂停</button>
+            <button id="btnSkip">⏭ 跳点…</button>
+            <button id="btnDownload">⬇ 下载</button>
+            <button id="btnClear">🗑 清空</button>
+            <button id="btnSaveWp">💾 保存文件</button>
+            <button id="btnLoadWp">📂 读取文件</button>
+          </div>
+          <button id="btnLoadKml" style="width:100%;margin-top:8px">🗺 导入 KML 田块边界</button>
+          <input id="fileWp" type="file" accept=".waypoints,.txt" style="display:none">
+          <input id="fileKml" type="file" accept=".kml" style="display:none">
         </div>
-        <div class="row tight" style="margin-bottom:8px">
-          <label class="lbl">模式</label>
-          <select id="modeSel" class="mode">
-            <option>MANUAL</option><option>HOLD</option><option>AUTO</option>
-            <option>GUIDED</option><option>RTL</option><option>SMART_RTL</option>
-            <option>STEERING</option><option>LOITER</option><option>ACRO</option><option>FOLLOW</option>
-          </select>
-          <button id="btnSetMode">设置</button>
-        </div>
-        <div class="grid-btn" style="margin-bottom:8px">
-          <button id="btnRtl" class="warn">返航 RTL</button>
-          <button id="btnStart" class="primary">启动任务(AUTO)</button>
-        </div>
-        <div class="grid-btn" style="margin-bottom:8px">
-          <button id="btnPause" class="warn">暂停 (HOLD)</button>
-          <button id="btnSkip">跳到航点…</button>
-        </div>
-        <div class="row tight" style="margin-bottom:8px">
-          <label class="lbl">速度</label><input id="spd" class="num" type="number" step="0.1" value="1.5">
-          <span class="lbl">m/s</span><button id="btnSpeed">改速</button>
-        </div>
-        <button id="btnEstop" class="danger" style="width:100%">⛔ 急停（强制上锁）</button>
-      </div>
+      </section>
 
-      <div class="sec">
-        <h3>任务 / 航点</h3>
-        <div class="row tight" style="margin-bottom:6px">
-          <button id="btnAdd">✏️ 添加航点</button>
-          <label class="lbl">默认高度</label><input id="defAlt" class="num" type="number" value="0">
-          <span class="lbl">m</span>
+      <section class="card">
+        <button class="card-h" type="button">地理围栏 <span class="chev">▸</span></button>
+        <div class="card-b">
+          <div class="row tight" style="margin-bottom:7px">
+            <button id="btnFenceInc">▰ 画包含区</button>
+            <button id="btnFenceExc">▱ 画排除区</button>
+            <button id="btnFenceDone">✓ 完成</button>
+          </div>
+          <div class="grid-btn">
+            <button id="btnFenceUpload" class="primary">⬆ 上传围栏</button>
+            <button id="btnFenceClear">🗑 清空围栏</button>
+            <button id="btnFenceOn" class="warn">启用围栏</button>
+            <button id="btnFenceOff">停用围栏</button>
+          </div>
+          <div class="row tight" style="margin-top:8px"><span class="lbl">越界状态:</span><span class="v" id="fenceBreach">--</span></div>
         </div>
-        <div class="wps" id="wpList"></div>
-        <div class="grid-btn" style="margin-top:6px">
-          <button id="btnUpload" class="primary">⬆ 上传任务</button>
-          <button id="btnDownload">⬇ 下载任务</button>
-          <button id="btnStart2" class="primary">▶ 启动</button>
-          <button id="btnClear">🗑 清空</button>
-          <button id="btnSaveWp">💾 保存文件</button>
-          <button id="btnLoadWp">📂 读取文件</button>
-        </div>
-        <button id="btnLoadKml" style="width:100%;margin-top:6px">🗺 导入 KML 田块边界</button>
-        <input id="fileWp" type="file" accept=".waypoints,.txt" style="display:none">
-        <input id="fileKml" type="file" accept=".kml" style="display:none">
-      </div>
+      </section>
 
-      <div class="sec">
-        <h3>地理围栏</h3>
-        <div class="row tight" style="margin-bottom:6px">
-          <button id="btnFenceInc">▰ 画包含区</button>
-          <button id="btnFenceExc">▱ 画排除区</button>
-          <button id="btnFenceDone">✓ 完成</button>
+      <section class="card">
+        <button class="card-h" type="button">手柄 / 键盘遥控 <span class="chev">▸</span></button>
+        <div class="card-b">
+          <div class="row tight" style="margin-bottom:7px">
+            <button id="btnJoy">🎮 启用遥控</button>
+            <span class="lbl" id="joyHint">需 MANUAL + 已解锁</span>
+          </div>
+          <div class="row tight">
+            <span class="lbl">转向</span><span class="v" id="joySteer">0.00</span>
+            <span class="lbl" style="margin-left:14px">油门</span><span class="v" id="joyThr">0.00</span>
+          </div>
+          <div class="lbl" style="margin-top:6px">手柄左摇杆；或键盘 W/S=油门, A/D=转向, 空格=急停</div>
         </div>
-        <div class="grid-btn">
-          <button id="btnFenceUpload" class="primary">⬆ 上传围栏</button>
-          <button id="btnFenceClear">🗑 清空围栏</button>
-          <button id="btnFenceOn" class="warn">启用围栏</button>
-          <button id="btnFenceOff">停用围栏</button>
-        </div>
-        <div class="row tight" style="margin-top:6px"><span class="lbl">越界状态:</span><span class="v" id="fenceBreach">--</span></div>
-      </div>
+      </section>
 
-      <div class="sec">
-        <h3>手柄 / 键盘遥控</h3>
-        <div class="row tight" style="margin-bottom:6px">
-          <button id="btnJoy">🎮 启用遥控</button>
-          <span class="lbl" id="joyHint">需 MANUAL + 已解锁</span>
+      <section class="card">
+        <button class="card-h" type="button">操作员参数 (APM Rover) <span class="chev">▸</span></button>
+        <div class="card-b">
+          <div class="row tight" style="margin-bottom:7px">
+            <button id="btnParamsRead">读取全部</button>
+            <span class="lbl" id="paramHint">连接后点「读取全部」</span>
+          </div>
+          <div id="paramList"></div>
         </div>
-        <div class="row tight">
-          <span class="lbl">转向</span><span class="v" id="joySteer">0.00</span>
-          <span class="lbl" style="margin-left:14px">油门</span><span class="v" id="joyThr">0.00</span>
-        </div>
-        <div class="lbl" style="margin-top:4px">手柄左摇杆；或键盘 W/S=油门, A/D=转向, 空格=急停</div>
-      </div>
+      </section>
 
-      <div class="sec">
-        <h3>操作员参数 (APM Rover)</h3>
-        <div class="row tight" style="margin-bottom:6px">
-          <button id="btnParamsRead">读取全部</button>
-          <span class="lbl" id="paramHint">连接后点「读取全部」</span>
+      <section class="card">
+        <button class="card-h" type="button">记录 / 离线地图 <span class="chev">▸</span></button>
+        <div class="card-b">
+          <div class="row tight" style="margin-bottom:7px">
+            <button id="btnTlog">⏺ 开始记录(.tlog)</button>
+            <span class="lbl" id="tlogHint">未记录</span>
+          </div>
+          <div class="row tight">
+            <button id="btnCacheMap">⬇ 缓存当前区域</button>
+            <span class="lbl" id="cacheHint"></span>
+          </div>
         </div>
-        <div id="paramList"></div>
-      </div>
+      </section>
 
-      <div class="sec">
-        <h3>记录 / 离线地图</h3>
-        <div class="row tight" style="margin-bottom:6px">
-          <button id="btnTlog">⏺ 开始记录(.tlog)</button>
-          <span class="lbl" id="tlogHint">未记录</span>
+      <section class="card open">
+        <button class="card-h" type="button">状态日志 <span class="chev">▸</span></button>
+        <div class="card-b">
+          <div class="log" id="log"></div>
         </div>
-        <div class="row tight">
-          <button id="btnCacheMap">⬇ 缓存当前区域</button>
-          <span class="lbl" id="cacheHint"></span>
-        </div>
-      </div>
-
-      <div class="sec">
-        <h3>状态日志</h3>
-        <div class="log" id="log"></div>
-      </div>
+      </section>
     </div>
   </div>
 </div>

@@ -10,3 +10,5 @@ dist/
 logs/
 # deployment-specific test manual (contains this server's internal IPs/hostname) — keep out of the public repo
 测试手册.md
+测试手册.html
+public/测试手册.html

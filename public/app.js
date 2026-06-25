@@ -20,40 +20,32 @@ function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj))
 // ----------------------------------------------------------------------------
 const map = L.map('map', { zoomControl: true, attributionControl: false }).setView([34, 108], 4);
 
-// Bing tiles use a quadkey scheme (z/x/y -> quadkey). Chinese labels via mkt=zh-CN.
-function toQuadKey(x, y, z) {
-  let q = '';
-  for (let i = z; i > 0; i--) { let d = 0; const m = 1 << (i - 1); if (x & m) d++; if (y & m) d += 2; q += d; }
-  return q;
-}
-function bingLayer(type) { // 'a' aerial(卫星) | 'r' road(道路) | 'h' hybrid(卫星+标注)
-  const ext = type === 'r' ? 'png' : 'jpeg';
-  const subs = ['0', '1', '2', '3'];
-  const layer = L.tileLayer('', { maxZoom: 19, subdomains: subs, attribution: 'Bing' });
-  layer.getTileUrl = function (c) {
-    const s = subs[(c.x + c.y) % subs.length];
-    return 'https://ecn.t' + s + '.tiles.virtualearth.net/tiles/' + type + toQuadKey(c.x, c.y, c.z) + '.' + ext + '?g=1&mkt=zh-CN';
-  };
-  return layer;
-}
-function googleLayer(lyrs) { // m=道路 s=卫星 y=卫星+标注
-  return L.tileLayer('https://mt{s}.google.com/vt/lyrs=' + lyrs + '&hl=zh-CN&gl=cn&x={x}&y={y}&z={z}',
-    { subdomains: ['0', '1', '2', '3'], maxZoom: 20, attribution: 'Google' });
-}
+// ---- Basemaps: ONLY WGS-84-aligned sources are offered (no coordinate conversion) ----
+// Why: the vehicle GPS / MAVLink are WGS-84. Chinese map providers (Bing/Google road,
+// and their China satellite endpoints) serve GCJ-02 ("火星坐标") *shifted* tiles. With a
+// shifted basemap, clicking the imagery returns a TRUE WGS-84 coordinate that is offset by
+// ~hundreds of metres from the feature you see — so waypoints / goto land in the wrong
+// place (exactly the "rover didn't follow my waypoints" bug). Since we do NOT do GCJ-02
+// correction, we keep ONLY basemaps that are already WGS-84 in China, so map clicks map
+// 1:1 to GPS coordinates. Removed: Bing 道路/卫星/卫星+标注, Google 道路/卫星/卫星+标注.
+const esriImagery = L.tileLayer(
+  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  { maxZoom: 19, attribution: 'Esri World Imagery · WGS-84' });
+const osmStreet = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+  { maxZoom: 19, attribution: 'OpenStreetMap · WGS-84' });
+// transparent place-name labels, also WGS-84 → aligns with the imagery above
+const esriPlaces = L.tileLayer(
+  'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+  { maxZoom: 19, attribution: 'Esri Reference · WGS-84' });
 
 const baseLayers = {
-  'Bing 道路(中文)': bingLayer('r'),
-  'Bing 卫星': bingLayer('a'),
-  'Bing 卫星+标注(中文)': bingLayer('h'),
-  'Google 道路(中文)': googleLayer('m'),
-  'Google 卫星': googleLayer('s'),
-  'Google 卫星+标注(中文)': googleLayer('y'),
-  'OSM 街道': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: 'OSM' }),
-  'Esri 卫星': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: 'Esri' }),
+  '卫星 (Esri · WGS-84)': esriImagery,
+  '街道 (OSM · WGS-84)': osmStreet,
 };
-// Default: Bing road with Chinese labels (reachable on mainland China networks).
-baseLayers['Bing 道路(中文)'].addTo(map);
-L.control.layers(baseLayers, null, { position: 'topleft', collapsed: true }).addTo(map);
+const overlayLayers = { '地名注记 (WGS-84)': esriPlaces };
+// Default: WGS-84 satellite imagery — clicks correspond 1:1 to GPS, no offset.
+esriImagery.addTo(map);
+L.control.layers(baseLayers, overlayLayers, { position: 'topleft', collapsed: true }).addTo(map);
 
 let vehMarker = null, vehTrail = L.polyline([], { color: '#36b35a', weight: 2, opacity: .8 }).addTo(map);
 let homeMarker = null, firstFix = true;
@@ -363,7 +355,7 @@ document.getElementById('btnTlog').addEventListener('click', () => {
 });
 
 // ----- offline map cache -----
-let currentBase = baseLayers['Bing 道路(中文)'];
+let currentBase = esriImagery;
 map.on('baselayerchange', (e) => { currentBase = e.layer; });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 document.getElementById('btnCacheMap').addEventListener('click', async () => {

@@ -1,6 +1,7 @@
 /* Service worker: cache-first for map tiles, so pre-cached areas work offline. */
-const TILE_CACHE = 'rover-gcs-tiles-v1';
-const TILE_HOSTS = ['virtualearth.net', 'google.com', 'arcgisonline.com', 'tile.openstreetmap.org', 'mt0.google', 'mt1.google', 'mt2.google', 'mt3.google'];
+const TILE_CACHE = 'rover-gcs-tiles-v2';
+// Only WGS-84 tile hosts (GCJ-02 Bing/Google sources were removed to avoid map/GPS offset).
+const TILE_HOSTS = ['arcgisonline.com', 'tile.openstreetmap.org'];
 
 self.addEventListener('install', (e) => { self.skipWaiting(); });
 self.addEventListener('activate', (e) => { e.waitUntil(self.clients.claim()); });

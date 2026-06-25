@@ -374,6 +374,20 @@ function doChangeSpeed(speed) {
   cmdLong(common.MavCmd.DO_CHANGE_SPEED, { p1: 0, p2: speed, p3: -1 });
 }
 
+function startMission() {
+  // Robustly (re)start the mission from the first waypoint. Just sending MISSION_START
+  // or switching to AUTO does NOT restart a mission that is already in the completed /
+  // "stale" state — the firmware logs "Mission is stale" / "Auto mission changed but
+  // failed to restart command" and the rover sits with throttle 0 in AUTO. The reliable
+  // recipe (verified against real ArduPilot Rover SITL) is to cycle the mode and reset
+  // the current item: HOLD -> DO_SET_MISSION_CURRENT(0) -> AUTO -> MISSION_START.
+  log('start mission: HOLD -> reset current -> AUTO -> MISSION_START');
+  doSetMode(ROVER_MODES.HOLD);
+  setTimeout(() => cmdLong(common.MavCmd.DO_SET_MISSION_CURRENT, { p1: 0 }), 400);
+  setTimeout(() => doSetMode(ROVER_MODES.AUTO), 800);
+  setTimeout(() => cmdLong(common.MavCmd.MISSION_START), 1200);
+}
+
 function getParams(names) {
   for (const id of names) {
     const r = new common.ParamRequestRead();
@@ -519,7 +533,7 @@ function handleClientMessage(raw) {
     case 'rtl': doSetMode(ROVER_MODES.RTL); break;
     case 'auto': doSetMode(ROVER_MODES.AUTO); break;
     case 'pause': doSetMode(ROVER_MODES.HOLD); break;
-    case 'startMission': cmdLong(common.MavCmd.MISSION_START); doSetMode(ROVER_MODES.AUTO); break;
+    case 'startMission': startMission(); break;
     case 'estop': doArm(false, true); break;            // emergency: force disarm
     case 'goto': doGuidedGoto(m.lat, m.lon); break;
     case 'changeSpeed': doChangeSpeed(m.speed); break;

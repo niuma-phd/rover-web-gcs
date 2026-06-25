@@ -8,3 +8,5 @@ npm-debug.log*
 dist/
 .vscode/
 logs/
+# deployment-specific test manual (contains this server's internal IPs/hostname) — keep out of the public repo
+测试手册.md

@@ -43,6 +43,21 @@ const baseLayers = {
   '街道 (OSM · WGS-84)': osmStreet,
 };
 const overlayLayers = { '地名注记 (WGS-84)': esriPlaces };
+
+// 天地图 (Tianditu) — 官方基准面 CGCS2000，与 WGS-84 在导航尺度上等价（厘米级差异），
+// 不施加 GCJ-02 偏移 → 与 Esri/OSM 同属"真坐标"，点图压航点 1:1 对应 GPS。
+// 需注册的 tk 密钥（由 config.js 注入 window.TIANDITU_TK）。用 _w (Web Mercator) 切片配合 Leaflet。
+const TIANDITU_TK = (typeof window !== 'undefined' && window.TIANDITU_TK) ? String(window.TIANDITU_TK) : '';
+if (TIANDITU_TK) {
+  const tdt = (t) => L.tileLayer(
+    'https://t{s}.tianditu.gov.cn/DataServer?T=' + t + '&x={x}&y={y}&l={z}&tk=' + TIANDITU_TK,
+    { subdomains: '01234567', maxNativeZoom: 18, maxZoom: 19, attribution: '天地图 · CGCS2000≈WGS-84' });
+  baseLayers['天地图·卫星(中文)'] = L.layerGroup([tdt('img_w'), tdt('cia_w')]); // 影像 + 中文注记
+  baseLayers['天地图·街道(中文)'] = L.layerGroup([tdt('vec_w'), tdt('cva_w')]); // 矢量 + 中文注记
+  logLine('天地图图层已启用 (CGCS2000≈WGS-84，无 GCJ-02 偏移)', 'sys');
+} else {
+  logLine('天地图未启用：先用 scripts/set-tianditu-key.sh 设置 tk 密钥', 'sys');
+}
 // Default: WGS-84 satellite imagery — clicks correspond 1:1 to GPS, no offset.
 esriImagery.addTo(map);
 L.control.layers(baseLayers, overlayLayers, { position: 'topleft', collapsed: true }).addTo(map);

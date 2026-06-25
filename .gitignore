@@ -12,3 +12,6 @@ logs/
 测试手册.md
 测试手册.html
 public/测试手册.html
+# 天地图 tk 密钥注入文件 + 本地坐标核验页（含/引用密钥）— 绝不提交到公共仓库
+public/config.js
+public/verify-tdt.html

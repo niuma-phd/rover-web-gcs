@@ -13,6 +13,8 @@
     "itest": "node bridge/itest.js",
     "sim": "node sim/rover-sim.js",
     "simtest": "node sim/simtest.js",
+    "sitl": "scripts/run-sitl.sh",
+    "sitltest": "node sim/sitltest.js",
     "test": "node bridge/selftest.js && node bridge/itest.js && node sim/simtest.js"
   },
   "dependencies": {

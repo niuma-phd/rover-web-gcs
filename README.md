@@ -59,14 +59,47 @@ node sim/rover-sim.js
 车辆出现在地图（起点默认深圳附近）。可解锁、压航点上传并「启动任务」看它自动驾驶、
 画地理围栏看越界告警、用「启用遥控」+手柄/键盘手动驾驶。
 
-### 4b. 用真正的 ArduPilot SITL（可选）
+### 4b. 用真正的 ArduPilot Rover SITL（真实固件，已在本机验证 ✅）
 
+跑的是**真正的 ArduPilot Rover 固件**（SITL = Software-In-The-Loop），不是行为级仿真。
+本地端到端测试 `sim/sitltest.js` 对真实固件 **8/8 通过**（解锁 → GUIDED 引导驾驶 →
+任务上传握手 → AUTO 任务 → RTL 返航 → 上锁）。
+
+**一次性准备：**
 ```bash
-# 在 ardupilot 目录：
-sim_vehicle.py -v Rover --out=udp:127.0.0.1:14550
-# 或用 TCP：地面站选 TCP 连 127.0.0.1:5760
+# 1) 构建依赖（Ubuntu）
+sudo apt-get install -y build-essential ccache gawk python3-dev python3-venv \
+  libtool libxml2-dev libxslt1-dev pkg-config rsync
+
+# 2) python venv（注意 empy 必须是 3.3.4，4.x 会让 waf 构建失败）
+python3 -m venv ../apvenv && source ../apvenv/bin/activate
+pip install pymavlink MAVProxy "empy==3.3.4" future
+
+# 3) 拉源码并构建 Rover SITL
+git clone --recurse-submodules https://github.com/ArduPilot/ardupilot.git ../ardupilot
+cd ../ardupilot && ./waf configure --board sitl && ./waf rover
 ```
-地面站选 **UDP / 监听 14550**（或 TCP / 5760）→ 连接。
+
+**运行（每次）：**
+```bash
+# 终端 A：启动真实固件 SITL（默认起点 22.59,113.95，转发 MAVLink 到 UDP 14550）
+./scripts/run-sitl.sh
+# 终端 B：启动地面站
+npm start
+# 浏览器：选 UDP / 监听 14550 → 连接，即可看到真实固件驱动的车辆
+```
+> 关键点：**不要**给 `sim_vehicle.py` 再加 `--out=udp:127.0.0.1:14550` —— 它默认已经转发到
+> 14550，再加一个会重复输出（MAVProxy 两个源端口 → 桥接 UDP 套接字来回跳），会破坏任务上传的多轮握手。
+> `scripts/run-sitl.sh` 已按此处理。
+
+**自动化验证（真实固件）：**
+```bash
+./scripts/run-sitl.sh          # 终端 A
+node sim/sitltest.js           # 终端 B：自动解锁→GUIDED 驾驶→任务→RTL→上锁，打印 8/8
+```
+> 真实固件须等 EKF 收敛后才允许进 GUIDED/AUTO；`sitltest.js` 会先等 3D 定位再带重试地切模式。
+
+或用 TCP：地面站选 **TCP** 连 `127.0.0.1:5760`。
 
 ## 5. 连真实飞控
 
@@ -101,7 +134,11 @@ web-gcs/
 │   └── itest.js      # 端到端集成测试（假飞控，13/13）
 ├── sim/
 │   ├── rover-sim.js  # 行为级 ArduRover 仿真（UDP MAVLink，会真的开起来）
-│   └── simtest.js    # 全场景测试：围栏/任务/手柄遥控（8/8）
+│   ├── simtest.js    # 全场景测试：围栏/任务/手柄遥控（8/8）
+│   ├── sitltest.js   # 对真实 ArduPilot Rover SITL 的驾驶测试（8/8）
+│   └── sitlprobe.js  # 快速探针：打印真实固件经桥接的遥测
+├── scripts/
+│   └── run-sitl.sh   # 启动真实固件 SITL 并转发 MAVLink 到 14550
 └── public/
     ├── index.html
     ├── app.js        # 前端逻辑（WS / 地图 / 航点 / 命令 / 围栏 / 遥控）

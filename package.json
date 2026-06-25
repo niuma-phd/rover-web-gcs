@@ -1,0 +1,25 @@
+{
+  "name": "rover-web-gcs",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lightweight web ground control station for ArduPilot Rover (MVP). Browser UI + Node MAVLink bridge.",
+  "type": "commonjs",
+  "bin": {
+    "rover-gcs": "bridge/server.js"
+  },
+  "scripts": {
+    "start": "node bridge/server.js",
+    "selftest": "node bridge/selftest.js"
+  },
+  "dependencies": {
+    "leaflet": "^1.9.4",
+    "node-mavlink": "^2.0.0",
+    "ws": "^8.18.0"
+  },
+  "optionalDependencies": {
+    "serialport": "^12.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

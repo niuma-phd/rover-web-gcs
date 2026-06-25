@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>无人车地面站 (MVP)</title>
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="logo">🚜 无人车地面站 <small>MVP</small></div>
+    <div class="conn">
+      <select id="transport">
+        <option value="udp">UDP</option>
+        <option value="tcp">TCP</option>
+        <option value="serial">串口</option>
+      </select>
+      <span id="f-udp" class="conn"><label class="lbl">监听端口</label><input id="udpListen" class="short" value="14550"></span>
+      <span id="f-tcp" class="conn" style="display:none"><input id="tcpHost" value="127.0.0.1"><label class="lbl">:</label><input id="tcpPort" class="short" value="5760"></span>
+      <span id="f-serial" class="conn" style="display:none"><input id="serPath" value="COM3"><label class="lbl">波特率</label><input id="serBaud" class="short" value="57600"></span>
+      <button id="btnConn" class="primary">连接</button>
+    </div>
+    <div class="spacer"></div>
+    <span class="badge"><span id="linkDot" class="dot"></span><span id="linkText">未连接</span></span>
+    <span class="badge">模式 <b id="vMode">--</b></span>
+    <span class="badge" id="vArmedBadge">武装 <b id="vArmed" class="disarmed">--</b></span>
+    <span class="badge">GPS <b id="vGps">--</b></span>
+    <span class="badge">电池 <b id="vBatt">--</b></span>
+  </header>
+
+  <div class="body">
+    <div id="map"></div>
+    <div class="hint" id="hint">提示：先选链路并「连接」。开启「添加航点」后点击地图压点；Shift+点击地图 = 引导前往(Guided Goto)。</div>
+
+    <div class="panel">
+      <div class="sec">
+        <h3>遥测</h3>
+        <div class="tel">
+          <span class="k">飞行模式</span><span class="v" id="tMode">--</span>
+          <span class="k">武装状态</span><span class="v" id="tArmed">--</span>
+          <span class="k">地速</span><span class="v" id="tGs">-- m/s</span>
+          <span class="k">航向</span><span class="v" id="tHdg">--°</span>
+          <span class="k">GPS定位</span><span class="v" id="tFix">--</span>
+          <span class="k">卫星数</span><span class="v" id="tSats">--</span>
+          <span class="k">电压</span><span class="v" id="tVolt">-- V</span>
+          <span class="k">电量</span><span class="v" id="tPct">--%</span>
+          <span class="k">纬度</span><span class="v" id="tLat">--</span>
+          <span class="k">经度</span><span class="v" id="tLon">--</span>
+        </div>
+      </div>
+
+      <div class="sec">
+        <h3>控制指令</h3>
+        <div class="grid-btn" style="margin-bottom:8px">
+          <button id="btnArm" class="primary">解锁 Arm</button>
+          <button id="btnDisarm">上锁 Disarm</button>
+        </div>
+        <div class="row tight" style="margin-bottom:8px">
+          <label class="lbl">模式</label>
+          <select id="modeSel" class="mode">
+            <option>MANUAL</option><option>HOLD</option><option>AUTO</option>
+            <option>GUIDED</option><option>RTL</option><option>SMART_RTL</option>
+            <option>STEERING</option><option>LOITER</option><option>ACRO</option><option>FOLLOW</option>
+          </select>
+          <button id="btnSetMode">设置</button>
+        </div>
+        <div class="grid-btn" style="margin-bottom:8px">
+          <button id="btnRtl" class="warn">返航 RTL</button>
+          <button id="btnStart" class="primary">启动任务(AUTO)</button>
+        </div>
+        <button id="btnEstop" class="danger" style="width:100%">⛔ 急停（强制上锁）</button>
+      </div>
+
+      <div class="sec">
+        <h3>任务 / 航点</h3>
+        <div class="row tight" style="margin-bottom:6px">
+          <button id="btnAdd">✏️ 添加航点</button>
+          <label class="lbl">默认高度</label><input id="defAlt" class="num" type="number" value="0">
+          <span class="lbl">m</span>
+        </div>
+        <div class="wps" id="wpList"></div>
+        <div class="grid-btn" style="margin-top:6px">
+          <button id="btnUpload" class="primary">⬆ 上传任务</button>
+          <button id="btnDownload">⬇ 下载任务</button>
+          <button id="btnStart2" class="primary">▶ 启动</button>
+          <button id="btnClear">🗑 清空</button>
+        </div>
+      </div>
+
+      <div class="sec">
+        <h3>状态日志</h3>
+        <div class="log" id="log"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="vendor/leaflet/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+node_modules/
+.omc/
+*.log
+.DS_Store
+npm-debug.log*
+.env
+*.tlog
+dist/
+.vscode/

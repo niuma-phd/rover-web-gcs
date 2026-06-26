@@ -37,8 +37,15 @@
     cursor:pointer;background:var(--surface2);transition:.15s}
   .drop.drag{border-color:var(--accent);background:rgba(34,196,134,.09)}
   .drop .hint2{color:var(--muted);font-size:12.5px}
-  .thumb-wrap{display:flex;align-items:center;gap:10px;justify-content:center;flex-wrap:wrap}
-  .thumb{max-height:96px;max-width:100%;border-radius:7px;border:1px solid var(--line)}
+  .thumbs{display:flex;flex-wrap:wrap;gap:9px;justify-content:center}
+  .thumbs:empty{display:none}
+  .thumb-box{position:relative;line-height:0}
+  .thumb{height:84px;max-width:150px;border-radius:7px;border:1px solid var(--line);display:block;object-fit:cover}
+  .thumb-x{position:absolute;top:-7px;right:-7px;width:20px;height:20px;border-radius:50%;border:1px solid var(--line);
+    background:var(--surface);color:var(--ink);font-size:14px;line-height:1;cursor:pointer;padding:0;margin:0;
+    display:flex;align-items:center;justify-content:center}
+  .thumb-x:hover{border-color:var(--danger);color:#ff8b91}
+  .img-foot{display:flex;align-items:center;gap:12px;justify-content:center;margin-top:10px;flex-wrap:wrap}
   .img-info{font-size:11.5px;color:var(--muted)}
   button.rm-img{margin:0;width:auto;padding:5px 10px;font-size:12px;font-weight:600;background:var(--surface);
     border:1px solid var(--line);color:var(--muted);border-radius:7px}
@@ -64,14 +71,14 @@
         <textarea id="text" placeholder="描述你遇到的问题、期望的改动，或任何建议……" maxlength="4000" required></textarea>
         <label>联系方式（可选，方便回复你）</label>
         <input id="contact" placeholder="邮箱 / 微信 / 飞书…（留空也可以）" maxlength="200">
-        <label>截图（可选 · 点击选择 / 拖入 / 直接 Ctrl+V 粘贴）</label>
+        <label>截图（可选 · 最多 8 张 · 点击选择 / 拖入 / 直接 Ctrl+V 粘贴）</label>
         <div class="drop" id="drop">
-          <input type="file" id="file" accept="image/*" hidden>
-          <div class="hint2" id="dropHint">📷 点击选择图片，或把截图拖进来 / Ctrl+V 粘贴</div>
-          <div class="thumb-wrap" id="thumbWrap" style="display:none">
-            <img class="thumb" id="thumb" alt="预览">
+          <input type="file" id="file" accept="image/*" multiple hidden>
+          <div class="hint2" id="dropHint">📷 点击选择图片（可多选），或把截图拖进来 / Ctrl+V 粘贴</div>
+          <div class="thumbs" id="thumbs"></div>
+          <div class="img-foot" id="imgFoot" style="display:none">
             <span class="img-info" id="imgInfo"></span>
-            <button type="button" class="rm-img" id="rmImg">移除</button>
+            <button type="button" class="rm-img" id="addMore">+ 继续添加</button>
           </div>
         </div>
         <button id="submit" type="submit">提交反馈</button>
@@ -86,36 +93,75 @@
   </div>
 <script>
   const form = document.getElementById('form'), msg = document.getElementById('msg'), btn = document.getElementById('submit');
+  function showErr(t) { msg.className = 'msg err'; msg.textContent = t; }
 
-  // ---- optional screenshot: file / drag / paste -> downscale (<=1600px JPEG) -> base64 ----
-  let imageB64 = null, imageType = null;
+  // ---- optional screenshots: file(s) / drag / paste -> downscale (<=1600px JPEG) -> base64 ----
+  const MAX_IMAGES = 8, MAX_PX = 1600;
+  let images = []; // [{ b64, type, url }]
   const drop = document.getElementById('drop'), fileInput = document.getElementById('file'),
-        thumb = document.getElementById('thumb'), thumbWrap = document.getElementById('thumbWrap'),
-        dropHint = document.getElementById('dropHint'), imgInfo = document.getElementById('imgInfo'),
-        rmImg = document.getElementById('rmImg');
-  function setImage(file) {
-    if (!file || !/^image\//.test(file.type)) return;
-    const fr = new FileReader();
-    fr.onload = (ev) => { const im = new Image(); im.onload = () => {
-      const MAX = 1600; let w = im.width, h = im.height;
-      if (w > MAX || h > MAX) { const s = Math.min(MAX / w, MAX / h); w = Math.round(w * s); h = Math.round(h * s); }
-      const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
-      cv.getContext('2d').drawImage(im, 0, 0, w, h);
-      const url = cv.toDataURL('image/jpeg', 0.82);
-      imageB64 = url.split(',')[1]; imageType = 'image/jpeg';
-      thumb.src = url; thumbWrap.style.display = 'flex'; dropHint.style.display = 'none';
-      imgInfo.textContent = Math.round(imageB64.length * 3 / 4 / 1024) + ' KB';
-    }; im.src = ev.target.result; };
-    fr.readAsDataURL(file);
+        thumbs = document.getElementById('thumbs'), dropHint = document.getElementById('dropHint'),
+        imgInfo = document.getElementById('imgInfo'), imgFoot = document.getElementById('imgFoot'),
+        addMore = document.getElementById('addMore');
+
+  function renderImages() {
+    thumbs.innerHTML = '';
+    images.forEach((im, idx) => {
+      const box = document.createElement('div'); box.className = 'thumb-box';
+      const img = document.createElement('img'); img.className = 'thumb'; img.src = im.url; img.alt = '预览';
+      const x = document.createElement('button'); x.type = 'button'; x.className = 'thumb-x'; x.textContent = '×'; x.title = '移除';
+      x.addEventListener('click', (e) => { e.stopPropagation(); images.splice(idx, 1); renderImages(); });
+      box.appendChild(img); box.appendChild(x); thumbs.appendChild(box);
+    });
+    const has = images.length > 0;
+    dropHint.style.display = has ? 'none' : '';
+    imgFoot.style.display = has ? 'flex' : 'none';
+    if (has) {
+      const totalKb = Math.round(images.reduce((s, im) => s + im.b64.length * 3 / 4, 0) / 1024);
+      imgInfo.textContent = `${images.length}/${MAX_IMAGES} 张 · 约 ${totalKb} KB`;
+      addMore.style.display = images.length < MAX_IMAGES ? '' : 'none';
+    }
   }
-  function clearImage() { imageB64 = null; imageType = null; fileInput.value = ''; thumbWrap.style.display = 'none'; dropHint.style.display = ''; }
-  drop.addEventListener('click', (e) => { if (e.target !== rmImg) fileInput.click(); });
-  fileInput.addEventListener('change', () => setImage(fileInput.files[0]));
-  rmImg.addEventListener('click', (e) => { e.stopPropagation(); clearImage(); });
+  // downscale one image File and append it; resolves when done (so we can add sequentially & keep order)
+  function addOne(file) {
+    return new Promise((resolve) => {
+      if (!file || !/^image\//.test(file.type) || images.length >= MAX_IMAGES) return resolve();
+      const fr = new FileReader();
+      fr.onload = (ev) => { const im = new Image(); im.onload = () => {
+        try {
+          let w = im.width, h = im.height;
+          if (w > MAX_PX || h > MAX_PX) { const s = Math.min(MAX_PX / w, MAX_PX / h); w = Math.round(w * s); h = Math.round(h * s); }
+          const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+          cv.getContext('2d').drawImage(im, 0, 0, w, h);
+          const url = cv.toDataURL('image/jpeg', 0.82);
+          images.push({ b64: url.split(',')[1], type: 'image/jpeg', url });
+          renderImages();
+        } catch (_) { showErr('有一张图片无法处理，已跳过'); }
+        finally { resolve(); } // never leave the sequential add-queue hanging
+      }; im.onerror = resolve; im.src = ev.target.result; };
+      fr.onerror = resolve; fr.readAsDataURL(file);
+    });
+  }
+  async function addFiles(list) {
+    const raw = [...(list || [])];
+    const files = raw.filter((f) => f && /^image\//.test(f.type));
+    if (!files.length) { if (raw.length) showErr('仅支持图片文件'); return; }
+    const room = MAX_IMAGES - images.length;
+    if (room <= 0) { showErr(`最多 ${MAX_IMAGES} 张截图`); return; }
+    if (files.length > room) showErr(`最多 ${MAX_IMAGES} 张，已忽略多余的 ${files.length - room} 张`);
+    for (const f of files.slice(0, room)) await addOne(f); // sequential -> stable order
+  }
+  function clearImages() { images = []; fileInput.value = ''; renderImages(); }
+
+  drop.addEventListener('click', (e) => { if (!e.target.closest('#thumbs') && !e.target.closest('#imgFoot')) fileInput.click(); });
+  addMore.addEventListener('click', (e) => { e.stopPropagation(); fileInput.click(); });
+  fileInput.addEventListener('change', () => { addFiles(fileInput.files); fileInput.value = ''; });
   ['dragover', 'dragenter'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('drag'); }));
   ['dragleave', 'dragend'].forEach((ev) => drop.addEventListener(ev, () => drop.classList.remove('drag')));
-  drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('drag'); if (e.dataTransfer.files[0]) setImage(e.dataTransfer.files[0]); });
-  window.addEventListener('paste', (e) => { const it = [...((e.clipboardData || {}).items || [])].find((i) => i.type.indexOf('image/') === 0); if (it) setImage(it.getAsFile()); });
+  drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('drag'); addFiles(e.dataTransfer.files); });
+  window.addEventListener('paste', (e) => {
+    const its = [...((e.clipboardData || {}).items || [])].filter((i) => i.type.indexOf('image/') === 0);
+    if (its.length) addFiles(its.map((i) => i.getAsFile()));
+  });
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -126,14 +172,15 @@
       const r = await fetch('/api/feedback', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, contact: document.getElementById('contact').value.trim(),
-          category: document.getElementById('category').value, image: imageB64, imageType }),
+          category: document.getElementById('category').value,
+          images: images.map((im) => ({ data: im.b64, type: im.type })) }),
       });
       const d = await r.json();
       if (r.ok && d.ok) {
         msg.className = 'msg ok'; msg.textContent = '✓ 已收到，谢谢！编号 ' + d.id + '。维护者会跟进处理。';
-        document.getElementById('text').value = ''; document.getElementById('contact').value = ''; clearImage();
-      } else { msg.className = 'msg err'; msg.textContent = '✗ 提交失败：' + (d.error || r.status); }
-    } catch (err) { msg.className = 'msg err'; msg.textContent = '✗ 网络错误：' + err.message; }
+        document.getElementById('text').value = ''; document.getElementById('contact').value = ''; clearImages();
+      } else { showErr('✗ 提交失败：' + (d.error || r.status)); }
+    } catch (err) { showErr('✗ 网络错误：' + err.message); }
     btn.disabled = false; btn.textContent = '提交反馈';
   });
 </script>

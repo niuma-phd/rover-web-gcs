@@ -603,17 +603,50 @@ function readFeedback() {
       .map((l) => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
   } catch (_) { return []; }
 }
-// ---- optional feedback screenshot (one image per feedback, gitignored) ----
+// ---- optional feedback screenshots (up to MAX_IMAGES per feedback, gitignored) ----
 const IMG_DIR = path.join(DATA_DIR, 'feedback-images');
 const IMG_TYPES = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
 const IMG_CTYPE = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif' };
-function saveFeedbackImage(id, b64, type) {
+const MAX_IMAGES = 8;                    // screenshots per feedback
+const MAX_IMG_BYTES = 6 * 1024 * 1024;   // decoded cap, per image
+const MAX_BODY = 24 * 1024 * 1024;       // request body cap (≈ MAX_IMAGES downsampled JPEGs + text)
+const MAX_INFLIGHT_UPLOADS = 4;          // concurrent feedback POSTs (this process also owns the live MAVLink link)
+let inFlightUploads = 0;
+// Confirm the decoded bytes actually start with the magic number for the claimed type, so a
+// forged MIME type can't get arbitrary bytes stored + served under an image/* extension.
+function imageMagicOk(buf, ext) {
+  if (!buf || buf.length < 12) return false;
+  switch (ext) {
+    case 'jpg': return buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF;
+    case 'png': return buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47;
+    case 'gif': return buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x38;
+    case 'webp': return buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46
+      && buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50;
+    default: return false;
+  }
+}
+// Save one screenshot as  <id>.<idx>.<ext>  and return the filename (or null).
+function saveFeedbackImage(id, idx, b64, type) {
   const ext = IMG_TYPES[type]; if (!ext || !b64) return null;
-  let buf; try { buf = Buffer.from(String(b64), 'base64'); } catch (_) { return null; }
-  if (!buf.length || buf.length > 6 * 1024 * 1024) return null; // 6 MB decoded cap
-  try { fs.mkdirSync(IMG_DIR, { recursive: true }); fs.writeFileSync(path.join(IMG_DIR, id + '.' + ext), buf); }
+  const buf = Buffer.from(String(b64), 'base64'); // base64 decode never throws; bad input -> short/empty buffer
+  if (!buf.length || buf.length > MAX_IMG_BYTES || !imageMagicOk(buf, ext)) return null;
+  const name = id + '.' + idx + '.' + ext;
+  try { fs.mkdirSync(IMG_DIR, { recursive: true }); fs.writeFileSync(path.join(IMG_DIR, name), buf); }
   catch (_) { return null; }
-  return id + '.' + ext;
+  return name;
+}
+// Accept the new  images:[{data,type}]  array (or the legacy single  image/imageType).
+// Returns the list of saved filenames, re-indexed so they are always 0..n-1 contiguous.
+function saveFeedbackImages(id, d) {
+  const list = Array.isArray(d.images) ? d.images
+    : (d.image ? [{ data: d.image, type: d.imageType }] : []);
+  const out = [];
+  for (const im of list.slice(0, MAX_IMAGES)) {
+    if (!im) continue;
+    const fn = saveFeedbackImage(id, out.length, im.data, String(im.type || ''));
+    if (fn) out.push(fn);
+  }
+  return out;
 }
 
 const server = http.createServer((req, res) => {
@@ -622,8 +655,11 @@ const server = http.createServer((req, res) => {
 
   // ---- feedback API ----
   if (urlPath === '/api/feedback' && req.method === 'POST') {
+    if (inFlightUploads >= MAX_INFLIGHT_UPLOADS) { res.writeHead(429); res.end('busy'); return; }
+    inFlightUploads++;
+    res.on('close', () => { inFlightUploads--; }); // fires once per response (success, 4xx, or aborted)
     let body = '', tooBig = false;
-    req.on('data', (c) => { body += c; if (body.length > 8 * 1024 * 1024) { tooBig = true; req.destroy(); } });
+    req.on('data', (c) => { body += c; if (body.length > MAX_BODY) { tooBig = true; req.destroy(); } });
     req.on('end', () => {
       if (tooBig) { res.writeHead(413); res.end('too large'); return; }
       let d; try { d = JSON.parse(body || '{}'); } catch (_) { res.writeHead(400); res.end('{"ok":false}'); return; }
@@ -634,10 +670,12 @@ const server = http.createServer((req, res) => {
         ts: new Date().toISOString(), text,
         contact: (d.contact || '').toString().slice(0, 200),
         category: (d.category || '').toString().slice(0, 40),
-        image: null, status: 'new', reply: null, ua: (req.headers['user-agent'] || '').slice(0, 200),
+        images: [], status: 'new', reply: null, ua: (req.headers['user-agent'] || '').slice(0, 200),
       };
-      if (d.image) { const fn = saveFeedbackImage(item.id, d.image, String(d.imageType || '')); if (fn) item.image = fn; }
-      appendFeedback(item); log('feedback received: ' + item.id + (item.image ? ' (+screenshot)' : ''));
+      item.images = saveFeedbackImages(item.id, d);
+      appendFeedback(item);
+      const n = item.images.length;
+      log('feedback received: ' + item.id + (n ? ` (+${n} screenshot${n > 1 ? 's' : ''})` : ''));
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, id: item.id }));
     });
     return;
@@ -646,11 +684,18 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(readFeedback())); return;
   }
   if (urlPath === '/api/feedback/image' && req.method === 'GET') {
-    const id = ((req.url.split('?')[1] || '').match(/(?:^|&)id=([^&]+)/) || [])[1] || '';
+    const qs = req.url.split('?')[1] || '';
+    const id = (qs.match(/(?:^|&)id=([^&]+)/) || [])[1] || '';
     const safe = decodeURIComponent(id).replace(/[^a-z0-9_]/gi, '');
-    const hit = safe && Object.values(IMG_TYPES).map((e) => path.join(IMG_DIR, safe + '.' + e)).find((p) => fs.existsSync(p));
+    const idx = (decodeURIComponent((qs.match(/(?:^|&)i=([^&]+)/) || [])[1] || '0').match(/^\d{1,3}$/) || ['0'])[0];
+    const exts = Object.values(IMG_TYPES);
+    const cand = safe
+      ? exts.map((e) => path.join(IMG_DIR, `${safe}.${idx}.${e}`))   // <id>.<idx>.<ext>
+          .concat(exts.map((e) => path.join(IMG_DIR, `${safe}.${e}`))) // legacy <id>.<ext>
+      : [];
+    const hit = cand.find((p) => fs.existsSync(p));
     if (!hit) { res.writeHead(404); res.end('not found'); return; }
-    res.writeHead(200, { 'Content-Type': IMG_CTYPE[path.extname(hit).slice(1)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
+    res.writeHead(200, { 'Content-Type': IMG_CTYPE[path.extname(hit).slice(1)] || 'application/octet-stream', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-cache' });
     fs.createReadStream(hit).pipe(res); return;
   }
 

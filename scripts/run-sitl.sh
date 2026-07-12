@@ -13,8 +13,8 @@
 #   then in the GCS connect via "UDP / listen 14550".
 set -e
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AP_DIR="${AP_DIR:-$(cd "$HERE/../.." && pwd)/ardupilot}"
-VENV_DIR="${VENV_DIR:-$(cd "$HERE/../.." && pwd)/apvenv}"
+AP_DIR="${AP_DIR:-$(cd "$HERE/../../.." && pwd)/ardupilot}"
+VENV_DIR="${VENV_DIR:-$(cd "$HERE/../../.." && pwd)/apvenv}"
 LAT="${1:-22.5900}"; LON="${2:-113.9500}"; ALT=5; HDG=0
 
 [ -x "$AP_DIR/build/sitl/bin/ardurover" ] || { echo "ardurover not built at $AP_DIR/build/sitl/bin/ — build it first (see README §SITL)"; exit 1; }

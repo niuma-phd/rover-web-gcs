@@ -116,7 +116,7 @@ function setMapMode(mode) {
 }
 
 // ----- mission lifecycle status pill -----
-const MSTATE = { none: '未规划', plan: '规划中', uploaded: '已上传', running: '执行中', done: '已完成' };
+const MSTATE = { none: '未规划', plan: '规划中', preview: '待批准', uploaded: '已上传', running: '执行中', done: '已完成' };
 function setMissionState(s) { const el = document.getElementById('missionState'); if (el) { el.textContent = MSTATE[s] || s; el.className = 'mst mst-' + s; } }
 function getMissionState() { const el = document.getElementById('missionState'); return el ? el.className.replace(/^mst mst-/, '') : 'none'; }
 function markPlanDirty() { setMissionState(wps.length ? 'plan' : 'none'); } // local edit ⇒ no longer matches vehicle
@@ -198,9 +198,11 @@ function onMsg(m) {
       if (m.breach) { el.textContent = '⚠ 越界!'; el.className = 'v armed'; }
       else { el.textContent = '正常'; el.className = 'v disarmed'; } break;
     }
-    case 'mission_list': loadDownloadedMission(m.items); break;
+    case 'mission_list': if (m.plan) showPlanPreview(m.items, m.src); else loadDownloadedMission(m.items); break;
     case 'mission_current': setText('tMode', getText('tMode')); break;
     case 'mission_reached': logLine('已到达航点 #' + m.seq, 'info'); break;
+    case 'mstat': renderMstat(m); break;
+    case 'rtcm': { const parts = Object.keys(m).filter((k) => k !== 't').map((k) => k + '=' + m[k]); logLine('RTCM 中继: ' + parts.join(' '), 'sys'); break; }
     case 'stale': setLinkStale(); break;
     case 'log': logLine(m.msg, 'sys'); break;
     default: break;
@@ -215,6 +217,61 @@ function loadDownloadedMission(items) {
   if (items.length) map.fitBounds(missionLine.getBounds().pad(0.3));
 }
 
+// ----- northbound mission-progress line (MSTAT → small status line under the mission pill) -----
+function renderMstat(m) {
+  const el = document.getElementById('mstatLine'); if (!el) return;
+  const state = m.state || '', total = m.total || 0;
+  if (!total && (state === 'IDLE' || state === '')) { el.style.display = 'none'; return; } // idle & no mission ⇒ hide
+  let s = '车端任务: ' + (state || '--');
+  if (total) s += '  ' + (m.cur || 0) + '/' + total;
+  if (m.dist_next != null) s += ' · 距下一点 ' + (Math.round(m.dist_next * 10) / 10) + ' m';
+  el.textContent = s; el.style.display = '';
+}
+
+// ----- PLAN preview + approval gate (northbound §3.8: vehicle computes, GCS previews/approves) --
+// The vehicle pushes a concrete PLAN (waypoint echo, or F2C coverage path) for operator review
+// BEFORE it is authorised to drive. Render it read-only in a distinct layer and gate execution
+// behind explicit approval — instead of silently overwriting the editable mission and marking it
+// "in sync" (the old behaviour, which let a vehicle-computed path start with no operator check).
+let planPreview = null;                                       // {items, src} | null
+const planLine = L.polyline([], { color: '#38bdf8', weight: 3, opacity: .95, dashArray: '2,7' }).addTo(map);
+let planMarkers = [];
+function clearPlanPreview() {
+  planLine.setLatLngs([]); planMarkers.forEach((mk) => map.removeLayer(mk)); planMarkers = [];
+  planPreview = null;
+  const b = document.getElementById('planBanner'); if (b) b.className = 'mapmode hidden';
+}
+function showPlanPreview(items, src) {
+  items = Array.isArray(items) ? items : [];
+  clearPlanPreview();
+  if (!items.length) { logLine('车端计划为空，忽略', 'warn'); return; }
+  planPreview = { items, src: src || '' };
+  planLine.setLatLngs(items.map((it) => [it.lat, it.lon]));
+  items.forEach((it, i) => planMarkers.push(
+    L.marker([it.lat, it.lon], { icon: L.divIcon({ className: '', html: '<div class="plan-marker">' + (i + 1) + '</div>', iconSize: [20, 20], iconAnchor: [10, 10] }) }).addTo(map)));
+  if (planLine.getBounds().isValid()) map.fitBounds(planLine.getBounds().pad(0.3));
+  const label = src === 'coverage' ? '覆盖规划' : (src === 'wp' ? '航点' : (src || '车端'));
+  setText('planBannerText', '🛰 车端计划预览：' + items.length + ' 点（来源: ' + label + '）— 审核后批准执行');
+  document.getElementById('planBanner').className = 'mapmode m-plan-preview';
+  setMissionState('preview');
+  logLine('🛰 收到车端计划 ' + items.length + ' 点 (src=' + (src || '?') + ')，待批准', 'info');
+}
+function approvePlan() {
+  if (!planPreview) return;
+  const items = planPreview.items;
+  clearPlanPreview();
+  loadDownloadedMission(items);          // promote to the active mission (marks uploaded/in-sync)
+  send({ t: 'startMission' });            // authorise the vehicle to execute its own plan
+  logLine('✓ 已批准车端计划并启动任务 (' + items.length + ' 点)', 'info');
+}
+function rejectPlan() {
+  if (!planPreview) return;
+  const n = planPreview.items.length;
+  clearPlanPreview();
+  setMissionState(wps.length ? 'uploaded' : 'none');
+  logLine('✗ 已拒绝车端计划 (' + n + ' 点)，未启动', 'warn');
+}
+
 // ----------------------------------------------------------------------------
 // UI helpers
 // ----------------------------------------------------------------------------
@@ -222,6 +279,7 @@ function setText(id, v) { const el = document.getElementById(id); if (el) el.tex
 function getText(id) { const el = document.getElementById(id); return el ? el.textContent : ''; }
 function setMode(name) {
   setText('tMode', name || '--'); setText('vMode', name || '--');
+  if (getMissionState() === 'preview') return;        // a vehicle plan awaits approval — don't let heartbeats clobber the 待批准 pill
   if (name === 'AUTO') setMissionState('running');
   else if (getMissionState() === 'running') setMissionState('uploaded'); // paused/changed out of AUTO, mission still loaded
 }
@@ -234,7 +292,7 @@ function setLink(on) {
   const dot = document.getElementById('linkDot'), txt = document.getElementById('linkText'), btn = document.getElementById('btnConn');
   dot.className = 'dot' + (on ? ' on' : ''); txt.textContent = on ? '已连接' : '未连接';
   btn.textContent = on ? '断开' : '连接'; btn.className = on ? '' : 'primary';
-  if (!on) { firstFix = true; }
+  if (!on) { firstFix = true; clearPlanPreview(); const ml = document.getElementById('mstatLine'); if (ml) ml.style.display = 'none'; }  // 断链清待批准计划（防陈旧移动授权）+ 隐藏车端任务行
 }
 function setLinkStale() { const dot = document.getElementById('linkDot'); dot.className = 'dot stale'; document.getElementById('linkText').textContent = '信号中断?'; }
 function fixName(f) { return ['无定位', '无定位', '2D', '3D', 'DGPS', 'RTK浮动', 'RTK固定'][f] || ('fix' + f); }
@@ -252,8 +310,35 @@ function logLine(msg, cls) {
 // ----------------------------------------------------------------------------
 function guard() { if (!linkConnected) { logLine('请先连接飞控', 'warn'); return false; } return true; }
 
+// ---- transport-aware UI: the northbound (self-dev VCU) protocol supports a smaller command
+// surface than ArduPilot/MAVLink. In north mode, adapt the mode dropdown and hide controls that
+// would silently no-op, so operators aren't misled. Pure show/hide + <option> rebuild; switching
+// back to a MAVLink transport restores the full ArduPilot UI (the demo path is unaffected). ----
+// ⚠ ROVER_MODES 必须与 index.html #modeSel 的 <option> 保持一致（applyTransportUI 会用本数组重建下拉）。
+const ROVER_MODES = ['MANUAL', 'HOLD', 'AUTO', 'GUIDED', 'RTL', 'SMART_RTL', 'STEERING', 'LOITER', 'ACRO', 'FOLLOW'];
+const NORTH_MODES = [['MANUAL', 'MANUAL'], ['IDLE', '待命 (IDLE)'], ['AUTO', 'AUTO']];
+const NORTH_HIDE = ['btnDownload', 'btnSkip', 'btnTlog'];   // silently no-op on northbound → hide
+function applyTransportUI(tr) {
+  const north = (tr === 'north');
+  const sel = document.getElementById('modeSel');
+  if (sel) {
+    const opts = north ? NORTH_MODES : ROVER_MODES.map((m) => [m, m]);
+    const want = opts.map((o) => o[0]).join(',');
+    if (sel.getAttribute('data-modes') !== want) {            // rebuild only when the set changes
+      sel.innerHTML = '';
+      opts.forEach(([v, label]) => { const o = document.createElement('option'); o.value = v; o.textContent = label; sel.appendChild(o); });
+      sel.setAttribute('data-modes', want);
+    }
+  }
+  NORTH_HIDE.forEach((id) => { const el = document.getElementById(id); if (el) el.style.display = north ? 'none' : ''; });
+  const fenceCard = document.getElementById('cardFence'); if (fenceCard) fenceCard.style.display = north ? 'none' : ''; // north v1 has no fence
+  if (!north) { const ml = document.getElementById('mstatLine'); if (ml) ml.style.display = 'none'; }  // 车端任务进度行仅北向用
+}
+
 document.getElementById('transport').addEventListener('change', (e) => {
-  for (const k of ['udp', 'tcp', 'serial']) document.getElementById('f-' + k).style.display = (e.target.value === k ? '' : 'none');
+  for (const k of ['udp', 'tcp', 'serial', 'north']) document.getElementById('f-' + k).style.display = (e.target.value === k ? '' : 'none');
+  applyTransportUI(e.target.value);
+  clearPlanPreview();   // 切换传输清任何待批准计划（防跨传输陈旧移动授权）
 });
 document.getElementById('btnConn').addEventListener('click', () => {
   if (linkConnected) { send({ t: 'disconnect' }); return; }
@@ -261,9 +346,13 @@ document.getElementById('btnConn').addEventListener('click', () => {
   const cfg = { t: 'connect', transport: tr };
   if (tr === 'udp') cfg.listen = document.getElementById('udpListen').value;
   else if (tr === 'tcp') { cfg.host = document.getElementById('tcpHost').value; cfg.port = document.getElementById('tcpPort').value; }
+  else if (tr === 'north') { cfg.host = document.getElementById('northHost').value; cfg.port = document.getElementById('northPort').value; }
   else { cfg.path = document.getElementById('serPath').value; cfg.baud = document.getElementById('serBaud').value; }
   saveSettings(); send(cfg); logLine('正在连接 (' + tr + ')…', 'sys');
 });
+
+document.getElementById('btnPlanApprove').addEventListener('click', approvePlan);
+document.getElementById('btnPlanReject').addEventListener('click', rejectPlan);
 
 document.getElementById('btnArm').addEventListener('click', () => { if (guard()) { send({ t: 'arm', arm: true }); logLine('发送: 解锁', 'info'); } });
 document.getElementById('btnDisarm').addEventListener('click', () => { if (guard()) { send({ t: 'arm', arm: false }); logLine('发送: 上锁', 'info'); } });
@@ -434,12 +523,13 @@ document.getElementById('btnCacheMap').addEventListener('click', async () => {
 function saveSettings() {
   const s = { transport: document.getElementById('transport').value, udpListen: document.getElementById('udpListen').value,
     tcpHost: document.getElementById('tcpHost').value, tcpPort: document.getElementById('tcpPort').value,
-    serPath: document.getElementById('serPath').value, serBaud: document.getElementById('serBaud').value };
+    serPath: document.getElementById('serPath').value, serBaud: document.getElementById('serBaud').value,
+    northHost: document.getElementById('northHost').value, northPort: document.getElementById('northPort').value };
   try { localStorage.setItem('rover_gcs_conn', JSON.stringify(s)); } catch (_) {}
 }
 (function restoreSettings() {
   let s; try { s = JSON.parse(localStorage.getItem('rover_gcs_conn') || '{}'); } catch (_) { s = {}; }
-  for (const k of ['transport', 'udpListen', 'tcpHost', 'tcpPort', 'serPath', 'serBaud']) {
+  for (const k of ['transport', 'udpListen', 'tcpHost', 'tcpPort', 'serPath', 'serBaud', 'northHost', 'northPort']) {
     if (s[k] != null && document.getElementById(k)) document.getElementById(k).value = s[k];
   }
   document.getElementById('transport').dispatchEvent(new Event('change'));

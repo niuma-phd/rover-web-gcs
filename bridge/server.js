@@ -20,6 +20,8 @@ const dgram = require('dgram');
 const net = require('net');
 const { Writable } = require('stream');
 const { WebSocketServer } = require('ws');
+const { RtcmRelay } = require('./rtcm-relay');
+const { NorthBackend } = require('./north-backend');
 
 const {
   MavLinkPacketSplitter, MavLinkPacketParser, MavLinkProtocolV2,
@@ -31,6 +33,27 @@ const REGISTRY = { ...minimal.REGISTRY, ...common.REGISTRY, ...ardupilotmega.REG
 const WEB_PORT = parseInt(process.env.PORT || '8080', 10);
 const GCS_SYSID = 255;
 const GCS_COMPID = 190; // MAV_COMP_ID_MISSIONPLANNER
+
+// ---- NTRIP -> north RTCM correction relay (vehicle "gcs_relay" mode) ----------
+// Pulls RTCM3 from a CORS/VRS caster and streams it down the north JSON-lines link
+// to the vehicle bridge; relays the vehicle's GGA back up for VRS mountpoints.
+// Credentials live in a local secrets vault and are exported as env by
+// the operator BEFORE launch — NEVER hardcode them here (this process only reads env).
+// Empty NTRIP_HOST => relay stays DISABLED (safe default), matching the vehicle-side
+// ntrip_client (empty host/mountpoint => no connect).
+const NTRIP_HOST = (process.env.NTRIP_HOST || '').trim();
+const NTRIP_PORT = parseInt(process.env.NTRIP_PORT || '2101', 10);
+const NTRIP_MOUNT = (process.env.NTRIP_MOUNT || '').trim();
+const NTRIP_USER = process.env.NTRIP_USER || '';
+const NTRIP_PASS = process.env.NTRIP_PASS || '';
+const NORTH_HOST = (process.env.NORTH_HOST || '127.0.0.1').trim();
+const NORTH_PORT = parseInt(process.env.NORTH_PORT || '6001', 10);
+let rtcmRelay = null;
+
+// ---- 北向协议后端（「协议切换」）：connect{transport:'north'} 时替代整条 MAVLink 链 ----
+// null = 未激活（默认）——此时下方所有 north 守卫短路，MAVLink 行为 100% 不变。
+// 翻译层（契约↔WS-JSON 映射）见 bridge/north-backend.js；线协议权威 = docs/接口契约_v1.md。
+let northBackend = null;
 
 // ---- ArduPilot Rover flight modes (custom_mode) -------------------------------
 const ROVER_MODES = {
@@ -155,6 +178,14 @@ function mavSend(msg) {
 
 function connectLink(cfg) {
   disconnectLink();
+  // ---- 北向分支：先于任何 MAVLink 装配返回（transport==='north'）----
+  // 自研车端走 JSON-lines TCP（rover_gcs_bridge :6001），link/遥测广播由 NorthBackend 自己发。
+  if (cfg.transport === 'north') {
+    northBackend = new NorthBackend({ host: cfg.host, port: cfg.port, broadcast, log,
+      hasClients: () => clients.size > 0 });   // HB 仅在有活浏览器时喂车端看门狗（防机器流掩盖 COMMS_LOST）
+    northBackend.connect();
+    return;
+  }
   try {
     if (cfg.transport === 'serial') transport = makeSerial(cfg);
     else if (cfg.transport === 'tcp') transport = makeTcp(cfg);
@@ -185,6 +216,8 @@ function connectLink(cfg) {
 }
 
 function disconnectLink() {
+  // ---- 北向分支拆除（northBackend 为 null 时零影响，MAVLink 路径不变）----
+  if (northBackend) { try { northBackend.close(); } catch (_) {} northBackend = null; }
   tlogStop();
   if (hbInterval) { clearInterval(hbInterval); hbInterval = null; }
   if (transport) { try { transport.close(); } catch (_) {} transport = null; }
@@ -525,6 +558,8 @@ function log(msg) {
 
 function handleClientMessage(raw) {
   let m; try { m = JSON.parse(raw); } catch (_) { return; }
+  // ---- 北向激活时：connect/disconnect 之外的命令全部交北向后端翻译（不进 MAVLink switch）----
+  if (northBackend && m.t !== 'connect' && m.t !== 'disconnect') { northBackend.handleCommand(m); return; }
   switch (m.t) {
     case 'connect': connectLink(m); break;
     case 'disconnect': disconnectLink(); break;
@@ -555,8 +590,10 @@ function handleClientMessage(raw) {
 }
 
 function sendSnapshot(ws) {
-  const snap = { t: 'snapshot', vehicle, connected: vehicle.connected,
-    link: transport ? transport.describe() : null };
+  // 北向激活时快照来自 NorthBackend（未激活 = 原 MAVLink 快照，逐字不变）
+  const snap = northBackend ? northBackend.snapshot()
+    : { t: 'snapshot', vehicle, connected: vehicle.connected,
+      link: transport ? transport.describe() : null };
   const s = JSON.stringify(snap);
   if (ws && ws.readyState === 1) ws.send(s); else broadcast(snap);
 }
@@ -718,11 +755,25 @@ const wss = new WebSocketServer({ server, verifyClient: (info, cb) => {
 wss.on('connection', (ws) => {
   clients.add(ws);
   log('browser connected (' + clients.size + ')');
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });   // WS keepalive：回 pong 即判活
   sendSnapshot(ws);
   ws.on('message', (data) => handleClientMessage(data.toString()));
   ws.on('close', () => { clients.delete(ws); });
   ws.on('error', () => { clients.delete(ws); });
 });
+
+// WS keepalive：逐客户端 ping，未回 pong 者判为半开死连接并 terminate（触发 close→clients.delete）。
+// 使 clients 反映"活着的浏览器"，令 north HB 的操作员在场门控对掉线/崩溃的浏览器亦可靠（契约 §2.8）；
+// MAVLink 侧同样受益（剔除幽灵连接）。5s 一轮 ⇒ 半开连接≤10s 被剔除。
+const wsKeepAlive = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) { try { ws.terminate(); } catch (_) {} return; }
+    ws.isAlive = false;
+    try { ws.ping(); } catch (_) {}
+  });
+}, 5000);
+wss.on('close', () => clearInterval(wsKeepAlive));
 
 // link watchdog: report stale heartbeat
 setInterval(() => {
@@ -736,4 +787,20 @@ server.listen(WEB_PORT, () => {
   console.log(`    open  ->  http://localhost:${WEB_PORT}\n`);
 });
 
-process.on('SIGINT', () => { disconnectLink(); process.exit(0); });
+// ---- start the NTRIP -> north RTCM relay (only if a caster host is configured) ----
+if (NTRIP_HOST) {
+  rtcmRelay = new RtcmRelay({
+    ntripHost: NTRIP_HOST, ntripPort: NTRIP_PORT, mountpoint: NTRIP_MOUNT,
+    username: NTRIP_USER, password: NTRIP_PASS,
+    northHost: NORTH_HOST, northPort: NORTH_PORT,
+  });
+  // surface relay state to the operator's browser (RTK-relay panel)
+  rtcmRelay.on('status', (s) => broadcast(Object.assign({ t: 'rtcm' }, s)));
+  rtcmRelay.on('ntrip-error', (e) => log('ntrip: ' + (e && e.message ? e.message : e)));
+  rtcmRelay.start();
+  log(`RTCM relay ENABLED: NTRIP ${NTRIP_HOST}:${NTRIP_PORT}/${NTRIP_MOUNT || '(no mount)'} -> north ${NORTH_HOST}:${NORTH_PORT}`);
+} else {
+  log('RTCM relay DISABLED (set NTRIP_HOST + NTRIP_MOUNT to enable; creds from vault via env)');
+}
+
+process.on('SIGINT', () => { if (rtcmRelay) { try { rtcmRelay.stop(); } catch (_) {} } disconnectLink(); process.exit(0); });

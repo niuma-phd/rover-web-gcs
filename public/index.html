@@ -16,10 +16,12 @@
         <option value="udp">UDP</option>
         <option value="tcp">TCP</option>
         <option value="serial">串口</option>
+        <option value="north">北向</option>
       </select>
       <span id="f-udp" class="conn"><label class="lbl">监听端口</label><input id="udpListen" class="short" value="14550"></span>
       <span id="f-tcp" class="conn" style="display:none"><input id="tcpHost" value="127.0.0.1"><label class="lbl">:</label><input id="tcpPort" class="short" value="5760"></span>
       <span id="f-serial" class="conn" style="display:none"><input id="serPath" value="COM3"><label class="lbl">波特率</label><input id="serBaud" class="short" value="57600"></span>
+      <span id="f-north" class="conn" style="display:none"><input id="northHost" value="127.0.0.1"><label class="lbl">:</label><input id="northPort" class="short" value="6001"></span>
       <button id="btnConn" class="primary">连接</button>
     </div>
     <div class="spacer"></div>
@@ -40,6 +42,7 @@
   <div class="body">
     <div id="map"></div>
     <div class="mapmode hidden" id="mapMode"><span id="mapModeText"></span><button id="btnModeExit">✕ 退出 (Esc)</button></div>
+    <div class="mapmode hidden" id="planBanner"><span id="planBannerText"></span><button id="btnPlanApprove">✓ 批准执行</button><button id="btnPlanReject">✗ 拒绝</button></div>
     <div class="hint" id="hint">提示：先选链路并「连接」。在「任务 / 航点」里点「✏️ 规划航点」开始压点；点「🎯 去这里」让车辆即时前往。</div>
     <div class="coords" id="coords">纬度 <b id="tLat">--</b> · 经度 <b id="tLon">--</b></div>
 
@@ -73,6 +76,7 @@
         <button class="card-h" type="button">任务 / 航点 <span class="chev">▸</span></button>
         <div class="card-b">
           <div class="mstat">任务 <b id="wpCount">0</b> 个航点 · <span id="missionState" class="mst mst-none">未规划</span></div>
+          <div class="lbl" id="mstatLine" style="display:none"></div>
           <div class="grid-btn" style="margin-bottom:8px">
             <button id="btnAdd">✏️ 规划航点</button>
             <button id="btnGoto" class="warn">🎯 去这里</button>
@@ -94,7 +98,7 @@
         </div>
       </section>
 
-      <section class="card">
+      <section class="card" id="cardFence">
         <button class="card-h" type="button">地理围栏 <span class="chev">▸</span></button>
         <div class="card-b">
           <div class="row tight" style="margin-bottom:7px">

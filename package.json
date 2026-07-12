@@ -15,7 +15,10 @@
     "simtest": "node sim/simtest.js",
     "sitl": "scripts/run-sitl.sh",
     "sitltest": "node sim/sitltest.js",
-    "test": "node bridge/selftest.js && node bridge/itest.js && node sim/simtest.js"
+    "rtcmtest": "node bridge/rtcm-test.js",
+    "northtest": "node bridge/north-test.js",
+    "northfixtest": "node bridge/north-fix-test.js",
+    "test": "node bridge/selftest.js && node bridge/itest.js && node sim/simtest.js && node bridge/rtcm-test.js && node bridge/north-test.js && node bridge/north-fix-test.js"
   },
   "dependencies": {
     "leaflet": "^1.9.4",

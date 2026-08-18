@@ -89,10 +89,11 @@ function updateHome(lat, lon) {
 // ----------------------------------------------------------------------------
 // Map interaction modes — exactly one active at a time (QGC-style explicit tool)
 // ----------------------------------------------------------------------------
-let mapMode = null; // 'plan' | 'goto' | 'fenceInc' | 'fenceExc' | null
+let mapMode = null; // 'plan' | 'goto' | 'field' | 'fenceInc' | 'fenceExc' | null
 const MODE_INFO = {
   plan:     { btn: 'btnAdd',      cls: 'm-plan',  txt: '✏️ 规划航点：点击地图依次添加航点 · 拖动微调 · ✕ 删除 · 完成后点「⬆ 上传任务」' },
-  goto:     { btn: 'btnGoto',     cls: 'm-goto',  txt: '🎯 去这里：点击地图，车辆立即前往该点 (GUIDED)' },
+  goto:     { btn: 'btnGoto',     cls: 'm-goto',  txt: '🎯 去这里：点击地图，将该点作为单点任务发送并启动' },
+  field:    { btn: 'btnDrawField', cls: 'm-field', txt: '🌾 绘制田块：依次点击边界顶点，至少 3 点；完成后点「闭合田块」' },
   fenceInc: { btn: 'btnFenceInc', cls: 'm-fence', txt: '▰ 画包含区(keep-in)：点击地图加顶点 → 点「✓ 完成」闭合（≥3 点）' },
   fenceExc: { btn: 'btnFenceExc', cls: 'm-fence', txt: '▱ 画排除区(keep-out)：点击地图加顶点 → 点「✓ 完成」闭合（≥3 点）' },
 };
@@ -117,33 +118,89 @@ function setMapMode(mode) {
 
 // ----- mission lifecycle status pill -----
 const MSTATE = { none: '未规划', plan: '规划中', preview: '待批准', uploaded: '已上传', running: '执行中', done: '已完成' };
+let coverageUploadPending = false, coverageMissionReady = false;
+function setCoverageActions(canUpload, canStart) {
+  const upload = document.getElementById('btnF2cUpload');
+  const start = document.getElementById('btnF2cStart');
+  if (upload) upload.disabled = !canUpload;
+  if (start) start.disabled = !canStart;
+}
 function setMissionState(s) { const el = document.getElementById('missionState'); if (el) { el.textContent = MSTATE[s] || s; el.className = 'mst mst-' + s; } }
 function getMissionState() { const el = document.getElementById('missionState'); return el ? el.className.replace(/^mst mst-/, '') : 'none'; }
-function markPlanDirty() { setMissionState(wps.length ? 'plan' : 'none'); } // local edit ⇒ no longer matches vehicle
+function markPlanDirty() {
+  coverageMissionReady = false; setCoverageActions(!!planPreview && planPreview.src === 'coverage', false);
+  setMissionState(wps.length ? 'plan' : 'none');
+} // local edit ⇒ no longer matches vehicle
 
 const wps = [];                 // {lat, lon, marker}
 const missionLine = L.polyline([], { color: '#2e9e4f', weight: 2, dashArray: '6,6' }).addTo(map);
+const missionReverseLine = L.polyline([], { color: '#f0a93b', weight: 4, opacity: .95 }).addTo(map);
+
+// Keep every trajectory sample in the polyline and in the uploaded mission,
+// but draw only representative numbered markers.  Direction/section changes
+// are always retained so fish-tail cusps remain obvious on the map.
+function trajectoryMarkerIndices(items, regularMarkerLimit = 32) {
+  const selected = new Set();
+  if (!Array.isArray(items) || !items.length) return selected;
+  const stride = Math.max(1, Math.ceil(items.length / regularMarkerLimit));
+  selected.add(0); selected.add(items.length - 1);
+  for (let i = 0; i < items.length; i += stride) selected.add(i);
+  for (let i = 1; i < items.length; ++i) {
+    const directionChanged = (items[i].dir || 1) !== (items[i - 1].dir || 1);
+    const sectionChanged = items[i].section != null && items[i - 1].section != null &&
+      items[i].section !== items[i - 1].section;
+    if (directionChanged || sectionChanged) {
+      selected.add(i - 1); selected.add(i);
+    }
+  }
+  return selected;
+}
 
 function wpIcon(n) { return L.divIcon({ className: '', html: '<div class="wp-marker">' + n + '</div>', iconSize: [24, 24], iconAnchor: [12, 12] }); }
 function redrawMission() {
   missionLine.setLatLngs(wps.map((w) => [w.lat, w.lon]));
+  missionReverseLine.setLatLngs(wps.slice(1).flatMap((w, i) =>
+    w.dir < 0 ? [[[wps[i].lat, wps[i].lon], [w.lat, w.lon]]] : []));
   wps.forEach((w, i) => { if (w.marker) w.marker.setIcon(wpIcon(i + 1)); });
   const list = document.getElementById('wpList'); list.innerHTML = '';
-  wps.forEach((w, i) => {
+  wps.slice(0, 200).forEach((w, i) => {
     const row = document.createElement('div'); row.className = 'wp';
-    row.innerHTML = '<span class="n">' + (i + 1) + '</span><span class="c">' + w.lat.toFixed(6) + ', ' + w.lon.toFixed(6) + '</span><span class="x" data-i="' + i + '">✕</span>';
+    const direction = w.dir < 0 ? '↙R ' : '';
+    const dirControl = i === 0 ? '<span class="wp-dir origin" title="起点">起</span>'
+      : '<button class="wp-dir ' + (w.dir < 0 ? 'reverse' : '') + '" data-dir-i="' + i +
+        '" title="从上一点到此点的方向；点击切换">' + (w.dir < 0 ? '倒' : '前') + '</button>';
+    row.innerHTML = '<span class="n">' + (i + 1) + '</span><span class="c">' + direction + w.lat.toFixed(6) + ', ' + w.lon.toFixed(6) + '</span>' + dirControl + '<span class="x" data-i="' + i + '">✕</span>';
     list.appendChild(row);
   });
+  if (wps.length > 200) {
+    const more = document.createElement('div'); more.className = 'lbl';
+    more.textContent = '轨迹共 ' + wps.length + ' 点；列表只显示前 200 点，地图显示完整轨迹'; list.appendChild(more);
+  }
   setText('wpCount', wps.length);
 }
-function addWaypoint(lat, lon) {
-  const w = { lat, lon };
-  w.marker = L.marker([lat, lon], { icon: wpIcon(wps.length + 1), draggable: true }).addTo(map);
-  w.marker.on('drag', (e) => { const p = e.target.getLatLng(); w.lat = p.lat; w.lon = p.lng; redrawMission(); markPlanDirty(); });
+function addWaypoint(lat, lon, extra = {}) {
+  const w = Object.assign({ lat, lon, dir: 1 }, extra, { lat, lon });
+  const makeMarker = extra.renderMarker === true ||
+    (extra.renderMarker !== false && wps.length < 250);
+  if (makeMarker) {
+    w.marker = L.marker([lat, lon], { icon: wpIcon(wps.length + 1), draggable: !w.planned }).addTo(map);
+    if (!w.planned) w.marker.on('drag', (e) => { const p = e.target.getLatLng(); w.lat = p.lat; w.lon = p.lng; redrawMission(); markPlanDirty(); });
+  }
   wps.push(w); redrawMission();
 }
 function clearMission() { wps.forEach((w) => w.marker && map.removeLayer(w.marker)); wps.length = 0; redrawMission(); }
 document.getElementById('wpList').addEventListener('click', (e) => {
+  const dirI = e.target.getAttribute && e.target.getAttribute('data-dir-i');
+  if (dirI !== null && dirI !== undefined) {
+    const idx = +dirI;
+    if (wps[idx]) {
+      wps[idx].dir = wps[idx].dir < 0 ? 1 : -1;
+      delete wps[idx].speed;
+      redrawMission(); markPlanDirty();
+      logLine('第 ' + idx + ' 段改为' + (wps[idx].dir < 0 ? '倒车' : '前进') + '（航点 ' + idx + ' → ' + (idx + 1) + '）', 'info');
+    }
+    return;
+  }
   const i = e.target.getAttribute && e.target.getAttribute('data-i');
   if (i !== null && i !== undefined) { const idx = +i; if (wps[idx]) { map.removeLayer(wps[idx].marker); wps.splice(idx, 1); redrawMission(); markPlanDirty(); } }
 });
@@ -157,6 +214,7 @@ map.on('click', (e) => {
   const lat = e.latlng.lat, lon = e.latlng.lng;
   if (mapMode === 'plan') { addWaypoint(lat, lon); logLine('航点 #' + wps.length + ': ' + lat.toFixed(6) + ', ' + lon.toFixed(6), 'sys'); markPlanDirty(); return; }
   if (mapMode === 'goto') { doGoto(lat, lon); return; }
+  if (mapMode === 'field') { addFieldVertex(lat, lon); return; }
   if (mapMode === 'fenceInc' || mapMode === 'fenceExc') { addFenceVertex(lat, lon); return; }
   if (e.originalEvent && e.originalEvent.shiftKey) doGoto(lat, lon); // power-user shortcut when no tool is active
 });
@@ -192,13 +250,33 @@ function onMsg(m) {
     case 'home': updateHome(m.lat, m.lon); logLine('收到 Home 位置', 'sys'); break;
     case 'text': logLine('FC: ' + m.text, sevClass(m.severity)); if (/mission complete/i.test(m.text)) setMissionState('done'); break;
     case 'ack': logLine('命令ACK: cmd=' + m.command + ' result=' + ackName(m.result), m.result === 0 ? 'info' : 'warn'); break;
-    case 'mission_uploaded': { const w = m.fence ? '围栏' : '任务'; logLine(m.ok ? '✓ ' + w + '上传成功' : '✗ ' + w + '上传被拒(type=' + m.result + ')', m.ok ? 'info' : 'err'); if (m.ok && !m.fence) setMissionState('uploaded'); break; }
+    case 'mission_uploaded': {
+      const w = m.fence ? '围栏' : '任务';
+      logLine(m.ok ? '✓ ' + w + '上传成功' : '✗ ' + w + '上传被拒(type=' + m.result + ')', m.ok ? 'info' : 'err');
+      if (!m.fence && coverageUploadPending) {
+        coverageUploadPending = false;
+        coverageMissionReady = !!m.ok;
+        setCoverageActions(!m.ok && wps.some((p) => p.planned), !!m.ok);
+        setText('f2cStatus', m.ok
+          ? '轨迹已写入车辆：' + wps.length + ' 点。完成 ARM 后点击③启动。'
+          : '轨迹上传失败，可点击②重试。');
+      }
+      if (m.ok && !m.fence) setMissionState('uploaded');
+      break;
+    }
     case 'fence_status': {
       const el = document.getElementById('fenceBreach');
       if (m.breach) { el.textContent = '⚠ 越界!'; el.className = 'v armed'; }
       else { el.textContent = '正常'; el.className = 'v disarmed'; } break;
     }
-    case 'mission_list': if (m.plan) showPlanPreview(m.items, m.src); else loadDownloadedMission(m.items); break;
+    case 'mission_list': loadDownloadedMission(m.items); break;
+    case 'coverage_status': setText('f2cStatus', 'Fields2Cover 正在规划…'); break;
+    case 'coverage_error': setText('f2cStatus', '规划失败'); logLine('Fields2Cover: ' + m.error, 'err'); break;
+    case 'coverage_plan':
+      setText('f2cStatus', '完成：' + m.swaths + ' 条作业行 / ' + m.items.length + ' 点 / ' + Number(m.lengthM || 0).toFixed(1) + ' m' +
+        (m.fieldContained ? ' / 田块内校验通过' : ''));
+      coverageMissionReady = false; setCoverageActions(true, false);
+      showPlanPreview(m.items, 'coverage'); break;
     case 'mission_current': setText('tMode', getText('tMode')); break;
     case 'mission_reached': logLine('已到达航点 #' + m.seq, 'info'); break;
     case 'mstat': renderMstat(m); break;
@@ -211,7 +289,8 @@ function onMsg(m) {
 function applyVehicle(v) { if (v.modeName) setMode(v.modeName); setArmed(v.armed); }
 function loadDownloadedMission(items) {
   clearMission();
-  items.forEach((it) => addWaypoint(it.lat, it.lon));
+  const markers = trajectoryMarkerIndices(items);
+  items.forEach((it, i) => addWaypoint(it.lat, it.lon, Object.assign({}, it, { renderMarker: markers.has(i) })));
   logLine('已下载任务: ' + items.length + ' 个航点', 'info');
   setMissionState(items.length ? 'uploaded' : 'none'); // came from the vehicle ⇒ in sync
   if (items.length) map.fitBounds(missionLine.getBounds().pad(0.3));
@@ -225,7 +304,14 @@ function renderMstat(m) {
   let s = '车端任务: ' + (state || '--');
   if (total) s += '  ' + (m.cur || 0) + '/' + total;
   if (m.dist_next != null) s += ' · 距下一点 ' + (Math.round(m.dist_next * 10) / 10) + ' m';
+  if (m.cmd_speed != null) s += ' · 指令 ' + m.cmd_speed.toFixed(2) + ' m/s';
+  if (m.cte != null) s += ' · 横误差 ' + m.cte.toFixed(2) + ' m';
+  if (m.dir != null) s += m.dir < 0 ? ' · 倒车' : ' · 前进';
+  if (m.curvature_saturated) s += ' · 转弯已限幅';
   el.textContent = s; el.style.display = '';
+  if (state === 'COMPLETED') setMissionState('done');
+  else if (state === 'RUNNING') setMissionState('running');
+  else if (state === 'PAUSED') setMissionState('uploaded');
 }
 
 // ----- PLAN preview + approval gate (northbound §3.8: vehicle computes, GCS previews/approves) --
@@ -235,9 +321,11 @@ function renderMstat(m) {
 // "in sync" (the old behaviour, which let a vehicle-computed path start with no operator check).
 let planPreview = null;                                       // {items, src} | null
 const planLine = L.polyline([], { color: '#38bdf8', weight: 3, opacity: .95, dashArray: '2,7' }).addTo(map);
+const planReverseLine = L.polyline([], { color: '#f0a93b', weight: 5, opacity: .95 }).addTo(map);
 let planMarkers = [];
 function clearPlanPreview() {
-  planLine.setLatLngs([]); planMarkers.forEach((mk) => map.removeLayer(mk)); planMarkers = [];
+  planLine.setLatLngs([]); planReverseLine.setLatLngs([]);
+  planMarkers.forEach((mk) => map.removeLayer(mk)); planMarkers = [];
   planPreview = null;
   const b = document.getElementById('planBanner'); if (b) b.className = 'mapmode hidden';
 }
@@ -247,27 +335,44 @@ function showPlanPreview(items, src) {
   if (!items.length) { logLine('车端计划为空，忽略', 'warn'); return; }
   planPreview = { items, src: src || '' };
   planLine.setLatLngs(items.map((it) => [it.lat, it.lon]));
-  items.forEach((it, i) => planMarkers.push(
-    L.marker([it.lat, it.lon], { icon: L.divIcon({ className: '', html: '<div class="plan-marker">' + (i + 1) + '</div>', iconSize: [20, 20], iconAnchor: [10, 10] }) }).addTo(map)));
+  planReverseLine.setLatLngs(items.slice(1).flatMap((it, i) =>
+    it.dir < 0 ? [[[items[i].lat, items[i].lon], [it.lat, it.lon]]] : []));
+  const markerIndices = trajectoryMarkerIndices(items);
+  items.forEach((it, i) => { if (markerIndices.has(i)) planMarkers.push(
+    L.marker([it.lat, it.lon], { icon: L.divIcon({ className: '', html: '<div class="plan-marker">' + (i + 1) + '</div>', iconSize: [20, 20], iconAnchor: [10, 10] }) }).addTo(map)); });
   if (planLine.getBounds().isValid()) map.fitBounds(planLine.getBounds().pad(0.3));
   const label = src === 'coverage' ? '覆盖规划' : (src === 'wp' ? '航点' : (src || '车端'));
-  setText('planBannerText', '🛰 车端计划预览：' + items.length + ' 点（来源: ' + label + '）— 审核后批准执行');
+  const reverseCount = items.slice(1).filter((it) => it.dir < 0).length;
+  setText('planBannerText', '🛰 计划预览：' + items.length + ' 点（来源: ' + label +
+    '，倒车段 ' + reverseCount + '）— 橙色为倒车；确认后上传到车辆，但不会自动启动');
   document.getElementById('planBanner').className = 'mapmode m-plan-preview';
   setMissionState('preview');
   logLine('🛰 收到车端计划 ' + items.length + ' 点 (src=' + (src || '?') + ')，待批准', 'info');
 }
 function approvePlan() {
-  if (!planPreview) return;
+  if (!planPreview || !guard()) return;
   const items = planPreview.items;
+  const source = planPreview.src;
   clearPlanPreview();
-  loadDownloadedMission(items);          // promote to the active mission (marks uploaded/in-sync)
-  send({ t: 'startMission' });            // authorise the vehicle to execute its own plan
-  logLine('✓ 已批准车端计划并启动任务 (' + items.length + ' 点)', 'info');
+  clearMission();
+  const markers = trajectoryMarkerIndices(items);
+  items.forEach((it, i) => addWaypoint(it.lat, it.lon, Object.assign({}, it, { renderMarker: markers.has(i) })));
+  markPlanDirty();
+  coverageUploadPending = source === 'coverage';
+  setCoverageActions(false, false);
+  if (coverageUploadPending) {
+    syncCoverageSpeeds(items);
+    setText('f2cStatus', '正在同步前/后退速度并上传 ' + items.length + ' 点…');
+  }
+  uploadCurrentMission();
+  logLine('✓ 已采用计划并上传 (' + items.length + ' 点)；上传不会启动车辆', 'info');
 }
 function rejectPlan() {
   if (!planPreview) return;
   const n = planPreview.items.length;
   clearPlanPreview();
+  coverageUploadPending = false; coverageMissionReady = false; setCoverageActions(false, false);
+  setText('f2cStatus', '已丢弃预览轨迹，车辆任务未改变');
   setMissionState(wps.length ? 'uploaded' : 'none');
   logLine('✗ 已拒绝车端计划 (' + n + ' 点)，未启动', 'warn');
 }
@@ -308,7 +413,7 @@ function logLine(msg, cls) {
 // ----------------------------------------------------------------------------
 // Controls wiring
 // ----------------------------------------------------------------------------
-function guard() { if (!linkConnected) { logLine('请先连接飞控', 'warn'); return false; } return true; }
+function guard() { if (!linkConnected) { logLine('请先连接车辆', 'warn'); return false; } return true; }
 
 // ---- transport-aware UI: the northbound (self-dev VCU) protocol supports a smaller command
 // surface than ArduPilot/MAVLink. In north mode, adapt the mode dropdown and hide controls that
@@ -316,8 +421,8 @@ function guard() { if (!linkConnected) { logLine('请先连接飞控', 'warn'); 
 // back to a MAVLink transport restores the full ArduPilot UI (the demo path is unaffected). ----
 // ⚠ ROVER_MODES 必须与 index.html #modeSel 的 <option> 保持一致（applyTransportUI 会用本数组重建下拉）。
 const ROVER_MODES = ['MANUAL', 'HOLD', 'AUTO', 'GUIDED', 'RTL', 'SMART_RTL', 'STEERING', 'LOITER', 'ACRO', 'FOLLOW'];
-const NORTH_MODES = [['MANUAL', 'MANUAL'], ['IDLE', '待命 (IDLE)'], ['AUTO', 'AUTO']];
-const NORTH_HIDE = ['btnDownload', 'btnSkip', 'btnTlog'];   // silently no-op on northbound → hide
+const NORTH_MODES = [['MANUAL', 'MANUAL'], ['IDLE', '待命 (IDLE)'], ['AUTO', '自动 (AUTO)']];
+const NORTH_HIDE = ['btnSkip', 'btnTlog'];
 function applyTransportUI(tr) {
   const north = (tr === 'north');
   const sel = document.getElementById('modeSel');
@@ -331,6 +436,10 @@ function applyTransportUI(tr) {
     }
   }
   NORTH_HIDE.forEach((id) => { const el = document.getElementById(id); if (el) el.style.display = north ? 'none' : ''; });
+  const speed = document.getElementById('spd');
+  if (speed) { speed.max = north ? '6.00' : ''; if (north && parseFloat(speed.value) > 6.00) speed.value = '6.00'; }
+  const stageNote = document.getElementById('northStageNote'); if (stageNote) stageNote.style.display = north ? '' : 'none';
+  const estopReset = document.getElementById('btnEstopReset'); if (estopReset) estopReset.style.display = north ? '' : 'none';
   const fenceCard = document.getElementById('cardFence'); if (fenceCard) fenceCard.style.display = north ? 'none' : ''; // north v1 has no fence
   if (!north) { const ml = document.getElementById('mstatLine'); if (ml) ml.style.display = 'none'; }  // 车端任务进度行仅北向用
 }
@@ -359,21 +468,87 @@ document.getElementById('btnDisarm').addEventListener('click', () => { if (guard
 document.getElementById('btnSetMode').addEventListener('click', () => { if (guard()) { const mode = document.getElementById('modeSel').value; send({ t: 'mode', mode }); logLine('发送: 模式 ' + mode, 'info'); } });
 document.getElementById('btnRtl').addEventListener('click', () => { if (guard()) { send({ t: 'rtl' }); logLine('发送: 返航 RTL', 'info'); } });
 document.getElementById('btnStart2').addEventListener('click', startMission);
-function startMission() { if (guard()) { send({ t: 'startMission' }); logLine('发送: 启动任务 (AUTO)', 'info'); } }
+function startMission() {
+  if (guard()) { send({ t: 'startMission' }); logLine('发送: 启动任务 (AUTO)', 'info'); }
+}
+document.getElementById('btnF2cUpload').addEventListener('click', () => {
+  if (planPreview && planPreview.src === 'coverage') approvePlan();
+  else if (wps.some((p) => p.planned) && guard()) {
+    coverageUploadPending = true; setCoverageActions(false, false);
+    syncCoverageSpeeds(wps);
+    setText('f2cStatus', '正在同步前/后退速度并重新上传 ' + wps.length + ' 点…');
+    uploadCurrentMission();
+  }
+});
+document.getElementById('btnF2cStart').addEventListener('click', () => {
+  if (!coverageMissionReady) return logLine('请先完成第②步，确认轨迹已上传到车辆', 'warn');
+  startMission();
+  setText('f2cStatus', '已发送启动命令：车辆先前往轨迹起点，再执行覆盖轨迹');
+});
 document.getElementById('btnEstop').addEventListener('click', () => {
   if (!guard()) return;
   if (confirm('确认急停？将强制上锁（电机立即停止）。')) { send({ t: 'estop' }); logLine('⛔ 发送: 急停 (强制上锁)', 'err'); }
 });
+document.getElementById('btnEstopReset').addEventListener('click', () => {
+  if (!guard()) return;
+  if (confirm('确认车辆已经静止且急停条件已解除？')) {
+    send({ t: 'estop', on: false }); logLine('发送: 解除软件急停（解除后仍需重新 ARM）', 'warn');
+  }
+});
 
 document.getElementById('btnAdd').addEventListener('click', () => setMapMode('plan'));
 document.getElementById('btnGoto').addEventListener('click', () => setMapMode('goto'));
+document.getElementById('btnDrawField').addEventListener('click', () => {
+  fieldPoints = []; redrawFieldBoundary(false); setMapMode('field');
+});
+document.getElementById('btnFieldDone').addEventListener('click', () => {
+  if (fieldPoints.length < 3) return logLine('田块至少需要 3 个顶点', 'warn');
+  redrawFieldBoundary(true); setMapMode(null);
+  logLine('田块边界已闭合：' + fieldPoints.length + ' 个顶点', 'info');
+});
+document.getElementById('btnFieldClear').addEventListener('click', () => {
+  fieldPoints = []; if (boundaryLayer) { map.removeLayer(boundaryLayer); boundaryLayer = null; }
+  setText('f2cStatus', '尚未规划');
+});
+document.getElementById('btnF2cPlan').addEventListener('click', () => {
+  if (fieldPoints.length < 3) return logLine('请先绘制田块或导入 KML 边界', 'warn');
+  const val = (id) => parseFloat(document.getElementById(id).value);
+  const rowText = document.getElementById('f2cRowHeading').value.trim();
+  send({ t: 'planCoverage', polygon: fieldPoints, params: {
+    coverageWidth: val('f2cWidth'), robotWidth: val('f2cRobotWidth'), headland: val('f2cHeadland'),
+    turningRadius: val('f2cRadius'), maxCurvatureRate: val('f2cCurvRate'),
+    forwardSpeed: val('f2cForwardSpeed'), reverseSpeed: val('f2cReverseSpeed'),
+    sampleStep: val('f2cStep'), rowHeading: rowText || 'auto',
+    allowReverse: document.getElementById('f2cReverse').checked,
+  } });
+  coverageUploadPending = false; coverageMissionReady = false; setCoverageActions(false, false);
+  setText('f2cStatus', 'Fields2Cover 正在规划…');
+  logLine('发送田块到本机 Fields2Cover（不会直接启动车辆）', 'info');
+});
 document.getElementById('btnModeExit').addEventListener('click', () => setMapMode(null));
-document.getElementById('btnUpload').addEventListener('click', () => {
+function uploadCurrentMission() {
   if (!guard()) return;
   if (!wps.length) return logLine('没有航点可上传', 'warn');
-  send({ t: 'uploadMission', items: wps.map((w) => ({ lat: w.lat, lon: w.lon, alt: 0 })) }); // rover ignores altitude
+  send({ t: 'uploadMission', items: wps.map((w) => ({
+    lat: w.lat, lon: w.lon, alt: 0, yaw: w.yaw, dir: w.dir || 1,
+    speed: w.speed, section: w.section, planned: !!w.planned,
+  })) }); // rover ignores altitude; north vehicle preserves trajectory metadata
   logLine('发送: 上传 ' + wps.length + ' 个航点…', 'info');
-});
+}
+function syncCoverageSpeeds(items) {
+  if (document.getElementById('transport').value !== 'north') return;
+  const speeds = (items || []).map((p) => ({
+    dir: Number(p.dir) < 0 ? -1 : 1,
+    speed: Math.min(6.0, Math.max(0.05, Math.abs(Number(p.speed) || 0))),
+  }));
+  const forward = speeds.filter((p) => p.dir > 0).reduce((v, p) => Math.max(v, p.speed), 0);
+  const reverse = speeds.filter((p) => p.dir < 0).reduce((v, p) => Math.max(v, p.speed), 0);
+  if (forward > 0) send({ t: 'setParam', id: 'CRUISE_SPEED', value: forward });
+  if (reverse > 0) send({ t: 'setParam', id: 'REVERSE_SPEED', value: reverse });
+  logLine('同步 F2C 执行速度：前进 ' + forward.toFixed(2) +
+    ' / 后退 ' + (reverse || 0).toFixed(2) + ' m/s', 'info');
+}
+document.getElementById('btnUpload').addEventListener('click', uploadCurrentMission);
 document.getElementById('btnDownload').addEventListener('click', () => { if (guard()) { send({ t: 'downloadMission' }); logLine('发送: 下载任务…', 'info'); } });
 document.getElementById('btnClear').addEventListener('click', () => { clearMission(); setMissionState('none'); logLine('已清空本地航点', 'sys'); });
 
@@ -382,7 +557,11 @@ document.getElementById('btnPause').addEventListener('click', () => { if (guard(
 document.getElementById('btnSpeed').addEventListener('click', () => {
   if (!guard()) return; const s = parseFloat(document.getElementById('spd').value);
   if (!isFinite(s) || s <= 0) return logLine('速度无效', 'warn');
-  send({ t: 'changeSpeed', speed: s }); logLine('发送: 改速 ' + s + ' m/s', 'info');
+  send({ t: 'changeSpeed', speed: s });
+  if (document.getElementById('transport').value === 'north') {
+    send({ t: 'setParam', id: 'REVERSE_SPEED', value: s });
+  }
+  logLine('发送: 自动前/后退改速 ' + s + ' m/s', 'info');
 });
 document.getElementById('btnSkip').addEventListener('click', () => {
   if (!guard()) return; const v = prompt('跳到第几个航点 (seq)?', '1'); if (v === null) return;
@@ -392,7 +571,10 @@ document.getElementById('btnSkip').addEventListener('click', () => {
 
 // ----- operator parameters (whitelist) -----
 const PARAM_WHITELIST = [
-  ['CRUISE_SPEED', '巡航速度 m/s'], ['WP_SPEED', '任务速度 m/s (0=巡航)'], ['WP_RADIUS', '航点到达半径 m'],
+  ['MANUAL_SPEED', '手动最大速度 m/s'],
+  ['CRUISE_SPEED', '前进速度 m/s'], ['REVERSE_SPEED', '后退速度 m/s'],
+  ['WP_SPEED', '任务速度 m/s (0=巡航)'], ['WP_RADIUS', '航点到达半径 m'],
+  ['MIN_TURN_RADIUS', '最小转弯半径 m'], ['LOOKAHEAD_MIN', '最小前视 m'], ['LOOKAHEAD_MAX', '最大前视 m'],
   ['TURN_MAX_G', '最大转弯 G'], ['FS_GCS_ENABLE', '地面站失联保护'], ['FS_TIMEOUT', '失联超时 s'],
   ['FS_ACTION', '失效动作'], ['BATT_LOW_VOLT', '低电压阈值 V'],
 ];
@@ -417,6 +599,10 @@ const paramInputs = {};
 })();
 function onParam(m) {
   const inp = paramInputs[m.id]; if (inp) { inp.disabled = false; inp.value = (Math.round(m.value * 1000) / 1000); }
+  if (m.id === 'MANUAL_SPEED') {
+    const manual = document.getElementById('manualSpeed');
+    if (manual) manual.value = (Math.round(m.value * 1000) / 1000);
+  }
   setText('paramHint', '已读取 ' + m.id);
 }
 document.getElementById('btnParamsRead').addEventListener('click', () => {
@@ -447,11 +633,37 @@ document.getElementById('btnSaveWp').addEventListener('click', () => {
   a.download = 'mission.waypoints'; a.click();
   logLine('已保存航点文件 (' + wps.length + ' 点)', 'info');
 });
+document.getElementById('btnSaveArf').addEventListener('click', () => {
+  if (!wps.length) return logLine('无轨迹可保存', 'warn');
+  const doc = { format: 'AutoRoverFieldMissionV1', allowReverse: wps.some((w) => w.dir < 0),
+    items: wps.map((w) => ({ lat: w.lat, lon: w.lon, yaw: w.yaw, dir: w.dir || 1,
+      speed: w.speed, section: w.section, planned: !!w.planned })) };
+  const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = 'mission.arf.json'; a.click();
+  logLine('已保存 AutoRoverField 轨迹文件（保留前进/倒车与速度）', 'info');
+});
 document.getElementById('btnLoadWp').addEventListener('click', () => document.getElementById('fileWp').click());
 document.getElementById('fileWp').addEventListener('change', (e) => {
   const f = e.target.files[0]; if (!f) return; const r = new FileReader();
-  r.onload = () => { loadWaypoints(String(r.result)); e.target.value = ''; }; r.readAsText(f);
+  r.onload = () => {
+    if (/\.json$/i.test(f.name)) loadArfMission(String(r.result)); else loadWaypoints(String(r.result));
+    e.target.value = '';
+  }; r.readAsText(f);
 });
+function loadArfMission(text) {
+  let doc; try { doc = JSON.parse(text); } catch (_) { return logLine('ARF 轨迹 JSON 解析失败', 'err'); }
+  if (!doc || doc.format !== 'AutoRoverFieldMissionV1' || !Array.isArray(doc.items)) {
+    return logLine('不是 AutoRoverFieldMissionV1 轨迹文件', 'err');
+  }
+  const items = doc.items.filter((it) => it && isFinite(it.lat) && isFinite(it.lon));
+  if (!items.length) return logLine('ARF 轨迹文件没有有效点', 'err');
+  clearMission();
+  const markers = trajectoryMarkerIndices(items);
+  items.forEach((it, i) => addWaypoint(+it.lat, +it.lon, Object.assign({}, it, { renderMarker: markers.has(i) })));
+  markPlanDirty(); if (missionLine.getBounds().isValid()) map.fitBounds(missionLine.getBounds().pad(0.3));
+  logLine('已读取 ARF 轨迹：' + items.length + ' 点，倒车段=' + (items.some((it) => it.dir < 0) ? '有' : '无'), 'info');
+}
 function loadWaypoints(text) {
   const lines = text.split(/\r?\n/).filter((l) => l.trim());
   if (!/^QGC WPL/.test(lines[0] || '')) return logLine('文件不是 .waypoints 格式', 'err');
@@ -469,7 +681,18 @@ function loadWaypoints(text) {
 }
 
 // ----- KML field boundary import -----
-let boundaryLayer = null;
+let boundaryLayer = null, fieldPoints = [];
+function redrawFieldBoundary(closed) {
+  if (boundaryLayer) map.removeLayer(boundaryLayer);
+  if (!fieldPoints.length) { boundaryLayer = null; return; }
+  boundaryLayer = closed
+    ? L.polygon(fieldPoints.map((p) => [p.lat, p.lon]), { color: '#e0a800', weight: 3, fillOpacity: 0.08 }).addTo(map)
+    : L.polyline(fieldPoints.map((p) => [p.lat, p.lon]), { color: '#e0a800', weight: 3, dashArray: '4,4' }).addTo(map);
+}
+function addFieldVertex(lat, lon) {
+  fieldPoints.push({ lat, lon }); redrawFieldBoundary(false);
+  setText('f2cStatus', '田块边界 ' + fieldPoints.length + ' 点（尚未闭合）');
+}
 document.getElementById('btnLoadKml').addEventListener('click', () => document.getElementById('fileKml').click());
 document.getElementById('fileKml').addEventListener('change', (e) => {
   const f = e.target.files[0]; if (!f) return; const r = new FileReader();
@@ -482,10 +705,13 @@ function loadKml(text) {
   const pts = el.textContent.trim().split(/\s+/).map((s) => s.split(',')).filter((a) => a.length >= 2)
     .map((a) => [parseFloat(a[1]), parseFloat(a[0])]).filter((p) => isFinite(p[0]) && isFinite(p[1]));
   if (!pts.length) return logLine('KML 坐标为空', 'err');
-  if (boundaryLayer) map.removeLayer(boundaryLayer);
-  boundaryLayer = L.polygon(pts, { color: '#e0a800', weight: 2, fillOpacity: 0.06, dashArray: '4,4' }).addTo(map);
+  fieldPoints = pts.map((p) => ({ lat: p[0], lon: p[1] }));
+  if (fieldPoints.length > 1 && Math.abs(fieldPoints[0].lat - fieldPoints[fieldPoints.length - 1].lat) < 1e-11 &&
+      Math.abs(fieldPoints[0].lon - fieldPoints[fieldPoints.length - 1].lon) < 1e-11) fieldPoints.pop();
+  redrawFieldBoundary(true);
   map.fitBounds(boundaryLayer.getBounds().pad(0.2));
-  logLine('已导入 KML 田块边界: ' + pts.length + ' 顶点', 'info');
+  setText('f2cStatus', '已导入田块：' + fieldPoints.length + ' 个顶点');
+  logLine('已导入 KML 田块边界: ' + fieldPoints.length + ' 顶点', 'info');
 }
 
 // ----- tlog recording -----
@@ -612,7 +838,14 @@ document.addEventListener('keydown', (e) => {
   if (k === ' ' || e.code === 'Space') { if (linkConnected) send({ t: 'estop' }); joyEnable(false); logLine('⛔ 键盘急停', 'err'); e.preventDefault(); }
 });
 document.addEventListener('keyup', (e) => { const k = (e.key || '').toLowerCase(); if (['w', 'a', 's', 'd'].includes(k)) keys[k] = false; });
-document.getElementById('btnJoy').addEventListener('click', () => { if (!joyOn && !linkConnected) return logLine('请先连接飞控', 'warn'); joyEnable(!joyOn); });
+document.getElementById('btnJoy').addEventListener('click', () => { if (!joyOn && !linkConnected) return logLine('请先连接车辆', 'warn'); joyEnable(!joyOn); });
+document.getElementById('btnManualSpeed').addEventListener('click', () => {
+  if (!guard()) return;
+  const speed = parseFloat(document.getElementById('manualSpeed').value);
+  if (!isFinite(speed) || speed < 0.05 || speed > 6.0) return logLine('手动最大速度必须在 0.05～6.00 m/s', 'warn');
+  send({ t: 'setParam', id: 'MANUAL_SPEED', value: speed });
+  logLine('发送: 手动最大速度 ' + speed.toFixed(2) + ' m/s', 'info');
+});
 window.addEventListener('gamepadconnected', () => logLine('手柄已连接', 'info'));
 
 // ----- collapsible panel sections -----

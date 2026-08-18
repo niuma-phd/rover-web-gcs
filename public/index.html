@@ -13,15 +13,15 @@
     <div class="brand"><span class="ic">🚜</span><span>无人车地面站</span><small>Rover GCS</small></div>
     <div class="conn">
       <select id="transport">
+        <option value="north" selected>AutoRover RTK</option>
         <option value="udp">UDP</option>
         <option value="tcp">TCP</option>
         <option value="serial">串口</option>
-        <option value="north">北向</option>
       </select>
-      <span id="f-udp" class="conn"><label class="lbl">监听端口</label><input id="udpListen" class="short" value="14550"></span>
+      <span id="f-udp" class="conn" style="display:none"><label class="lbl">监听端口</label><input id="udpListen" class="short" value="14550"></span>
       <span id="f-tcp" class="conn" style="display:none"><input id="tcpHost" value="127.0.0.1"><label class="lbl">:</label><input id="tcpPort" class="short" value="5760"></span>
       <span id="f-serial" class="conn" style="display:none"><input id="serPath" value="COM3"><label class="lbl">波特率</label><input id="serBaud" class="short" value="57600"></span>
-      <span id="f-north" class="conn" style="display:none"><input id="northHost" value="127.0.0.1"><label class="lbl">:</label><input id="northPort" class="short" value="6001"></span>
+      <span id="f-north" class="conn"><input id="northHost" value="127.0.0.1"><label class="lbl">:</label><input id="northPort" class="short" value="6001"></span>
       <button id="btnConn" class="primary">连接</button>
     </div>
     <div class="spacer"></div>
@@ -42,8 +42,8 @@
   <div class="body">
     <div id="map"></div>
     <div class="mapmode hidden" id="mapMode"><span id="mapModeText"></span><button id="btnModeExit">✕ 退出 (Esc)</button></div>
-    <div class="mapmode hidden" id="planBanner"><span id="planBannerText"></span><button id="btnPlanApprove">✓ 批准执行</button><button id="btnPlanReject">✗ 拒绝</button></div>
-    <div class="hint" id="hint">提示：先选链路并「连接」。在「任务 / 航点」里点「✏️ 规划航点」开始压点；点「🎯 去这里」让车辆即时前往。</div>
+    <div class="mapmode hidden" id="planBanner"><span id="planBannerText"></span><button id="btnPlanApprove">✓ 采用并上传</button><button id="btnPlanReject">✗ 丢弃</button></div>
+    <div class="hint" id="hint">提示：默认已选 AutoRover RTK，点「连接」即可查看车况和控制车辆；地图任务生成后不会自动行驶，仍需上传、ARM 和启动。</div>
     <div class="coords" id="coords">纬度 <b id="tLat">--</b> · 经度 <b id="tLon">--</b></div>
 
     <div class="panel">
@@ -63,16 +63,20 @@
             </select>
             <button id="btnSetMode">设置</button>
           </div>
+          <div class="lbl" id="northStageNote" style="display:none;margin-bottom:8px">AutoRover RTK：手动解锁不依赖定位；AUTO 启动时才检查 RTK 位置与航向</div>
           <button id="btnRtl" class="warn" style="width:100%;margin-bottom:8px">返航 RTL</button>
-          <div class="row tight" style="margin-bottom:8px">
-            <label class="lbl">速度</label><input id="spd" class="num" type="number" step="0.1" value="1.5">
+          <div class="row tight" id="speedControl" style="margin-bottom:8px">
+            <label class="lbl">自动速度</label><input id="spd" class="num" type="number" min="0.05" max="6.00" step="0.05" value="1.00">
             <span class="lbl">m/s</span><button id="btnSpeed">改速</button>
           </div>
-          <button id="btnEstop" class="danger" style="width:100%">⛔ 急停（强制上锁）</button>
+          <div class="grid-btn">
+            <button id="btnEstop" class="danger">⛔ 软件急停</button>
+            <button id="btnEstopReset" style="display:none">解除软件急停</button>
+          </div>
         </div>
       </section>
 
-      <section class="card open">
+      <section class="card open" id="cardMission">
         <button class="card-h" type="button">任务 / 航点 <span class="chev">▸</span></button>
         <div class="card-b">
           <div class="mstat">任务 <b id="wpCount">0</b> 个航点 · <span id="missionState" class="mst mst-none">未规划</span></div>
@@ -89,11 +93,40 @@
             <button id="btnSkip">⏭ 跳点…</button>
             <button id="btnDownload">⬇ 下载</button>
             <button id="btnClear">🗑 清空</button>
-            <button id="btnSaveWp">💾 保存文件</button>
+            <button id="btnSaveWp">💾 保存 QGC 航点</button>
+            <button id="btnSaveArf">💾 保存 ARF 轨迹</button>
             <button id="btnLoadWp">📂 读取文件</button>
           </div>
-          <button id="btnLoadKml" style="width:100%;margin-top:8px">🗺 导入 KML 田块边界</button>
-          <input id="fileWp" type="file" accept=".waypoints,.txt" style="display:none">
+          <div class="f2c-box">
+            <div class="f2c-title">Fields2Cover 田块覆盖</div>
+            <div class="grid-btn">
+              <button id="btnDrawField">🌾 绘制田块</button>
+              <button id="btnFieldDone">✓ 闭合田块</button>
+              <button id="btnLoadKml">🗺 导入 KML</button>
+              <button id="btnFieldClear">🗑 清除田块</button>
+            </div>
+            <div class="f2c-grid">
+              <label>作业幅宽 m<input id="f2cWidth" class="num" type="number" min="0.15" step="0.1" value="1.0"></label>
+              <label title="含左右余量的 F2C 规划占用宽度；车体实测外宽 0.37 m">规划占用宽 m<input id="f2cRobotWidth" class="num" type="number" min="0.15" step="0.05" value="0.70"></label>
+              <label>地头宽度 m<input id="f2cHeadland" class="num" type="number" min="0" step="0.1" value="2.8"></label>
+              <label>转弯半径 m<input id="f2cRadius" class="num" type="number" min="1.25" step="0.05" value="1.25"></label>
+              <label>前进速度 m/s<input id="f2cForwardSpeed" class="num" type="number" min="0.05" max="6.00" step="0.05" value="1.00"></label>
+              <label>倒车速度 m/s<input id="f2cReverseSpeed" class="num" type="number" min="0.05" max="6.00" step="0.05" value="1.00"></label>
+              <label>行航向 °<input id="f2cRowHeading" class="num" placeholder="auto" value="auto"></label>
+              <label>采样间距 m<input id="f2cStep" class="num" type="number" min="0.1" step="0.05" value="0.20"></label>
+              <label>曲率变化率<input id="f2cCurvRate" class="num" type="number" min="0.05" step="0.05" value="0.80"></label>
+              <label class="f2c-check"><input id="f2cReverse" type="checkbox" checked>允许倒车转向</label>
+            </div>
+            <div class="lbl f2c-profile">本车模型：Ackermann 后轴中心 · 轴距 0.3187 m · 外廓 0.49×0.37 m · 最大前轮角 21.72° · 机械半径 0.80 m<br>F2C 当前预设：占用宽 0.70 m · 规划/控制半径 1.25 m · 最大曲率 0.800 m⁻¹ · 空间曲率变化率 0.80 m⁻²</div>
+            <button id="btnF2cPlan" class="primary" style="width:100%">① 生成并预览覆盖轨迹</button>
+            <div class="grid-btn" style="margin-top:7px">
+              <button id="btnF2cUpload" class="primary" disabled>② 采用并上传到车辆</button>
+              <button id="btnF2cStart" class="primary" disabled>③ 启动已上传轨迹</button>
+            </div>
+            <div class="lbl" style="margin-top:6px">生成和上传都不会动车；完成 ARM 后，点击第③步才开始执行。</div>
+            <div class="lbl" id="f2cStatus">尚未规划</div>
+          </div>
+          <input id="fileWp" type="file" accept=".waypoints,.txt,.json" style="display:none">
           <input id="fileKml" type="file" accept=".kml" style="display:none">
         </div>
       </section>
@@ -116,12 +149,17 @@
         </div>
       </section>
 
-      <section class="card">
+      <section class="card" id="cardManual">
         <button class="card-h" type="button">手柄 / 键盘遥控 <span class="chev">▸</span></button>
         <div class="card-b">
           <div class="row tight" style="margin-bottom:7px">
             <button id="btnJoy">🎮 启用遥控</button>
             <span class="lbl" id="joyHint">需 MANUAL + 已解锁</span>
+          </div>
+          <div class="row tight" style="margin-bottom:7px">
+            <label class="lbl">手动最大速度</label>
+            <input id="manualSpeed" class="num" type="number" min="0.05" max="6.00" step="0.05" value="1.00">
+            <span class="lbl">m/s</span><button id="btnManualSpeed">设定</button>
           </div>
           <div class="row tight">
             <span class="lbl">转向</span><span class="v" id="joySteer">0.00</span>
@@ -131,7 +169,7 @@
         </div>
       </section>
 
-      <section class="card">
+      <section class="card" id="cardParams">
         <button class="card-h" type="button">操作员参数 (APM Rover) <span class="chev">▸</span></button>
         <div class="card-b">
           <div class="row tight" style="margin-bottom:7px">

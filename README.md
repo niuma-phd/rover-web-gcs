@@ -1,10 +1,11 @@
 # 无人车 Web 地面站 (MVP)
 
-面向 **ArduPilot Rover** 的轻量级 Web 地面站最小可用版本。
-浏览器界面（地图 / 遥测 / 压航点 / 发命令）+ Node 桥接进程（持有飞控链路、收发 MAVLink）。
+面向 **ArduPilot Rover** 和 **AutoRover RTK 车端**的轻量级 Web 地面站。
+浏览器界面（地图 / 遥测 / 压航点 / 覆盖规划 / 发命令）+ Node 桥接进程。
 
 ```
 浏览器(Leaflet UI)  <--WebSocket(JSON)-->  Node 桥接  <--MAVLink(串口/UDP/TCP)-->  ArduPilot Rover 飞控
+                                                   <--JSON-lines TCP------->  AutoRover RTK 车端
 ```
 
 > **为什么要桥接进程？** 浏览器不能直接打开串口/UDP，所以必须有一个本地 Node 进程
@@ -30,6 +31,8 @@ npm start          # 或: node bridge/server.js
 浏览器打开 **http://localhost:8080** （改端口：`PORT=9000 npm start`）。
 
 在页面左上角选择链路并点「连接」：
+- **AutoRover RTK**：连接车端北向端口，默认 `127.0.0.1:6001`。支持明确 ARM/DISARM、
+  手动驾驶、地图单点、带前进/倒车元数据的轨迹和车端任务状态。
 - **UDP**：填监听端口（默认 14550）。适合 WiFi 数传、SITL 仿真。
 - **TCP**：填 `host:port`（如 SITL 的 `127.0.0.1:5760`）。
 - **串口**：填串口号（Windows 如 `COM3`）+ 波特率（数传常用 57600，USB 直连常用 115200）。
@@ -40,7 +43,25 @@ npm start          # 或: node bridge/server.js
 npm run selftest          # 校验 node-mavlink API + heartbeat 编解码闭环
 node bridge/itest.js      # 端到端：假飞控 + 桥接 + WS 客户端，验证遥测/命令/任务上传（13/13）
 node sim/simtest.js       # 全场景：解锁→围栏→任务驾驶→越界告警→手柄遥控，验证车辆真的会动（8/8）
+npm run northtest         # AutoRover 北向协议、任务元数据、ARM/DISARM 与手动控制
 ```
+
+### 可选：Fields2Cover 覆盖规划
+
+覆盖规划在地面站侧调用独立的 `auto_rover_f2c` 可执行文件，仓库本身不捆绑 Fields2Cover。
+通过绝对路径接入已构建的适配器：
+
+```bash
+AUTO_ROVER_F2C_BIN=/absolute/path/to/auto_rover_f2c npm start
+AUTO_ROVER_F2C_BIN=/absolute/path/to/auto_rover_f2c npm run coveragetest
+```
+
+若适配器依赖共享库，同时把其库目录加入 `LD_LIBRARY_PATH`。未安装适配器时，默认测试会
+保留参数契约检查，并明确跳过真实 F2C 集成；一旦显式设置了无效路径，测试会失败。
+
+页面流程为“生成并预览 → 采用并上传 → ARM → 启动”。轨迹保留 `dir`、`speed`、`yaw`、
+`section` 元数据，并可保存为 `.arf.json`；适配器必须返回 `fieldContained:true`，否则地面站
+拒绝该覆盖轨迹。
 
 ## 4. 内置仿真环境（无需 ArduPilot SITL，推荐先在这里试）
 
@@ -115,6 +136,8 @@ node sim/sitltest.js           # 终端 B：自动解锁→GUIDED 驾驶→任�
 - **地图**：Leaflet；**只用 WGS-84 对齐底图（默认 Esri 卫星 / OSM 街道 / WGS-84 地名注记叠加）**，点图坐标与 GPS 1:1 对应、压航点不偏移；车辆位置 + 航向箭头 + 轨迹；Home 标记；**离线缓存（service worker + 缓存当前区域）**。已移除 Bing/Google 的中国 GCJ-02 偏移图源（见下「中国地图」说明）。
 - **遥测**：飞行模式、武装状态、地速、航向、GPS 定位类型/卫星数、链路 RSSI、电压/电量、经纬度；**低电量蜂鸣告警**。
 - **压航点 / 任务文件**：点图加点、拖动微调、删除；上传（完整 MISSION 握手）/ 下载 / 清空；**保存·读取 .waypoints**；**导入 KML 田块边界**。
+- **AutoRover 覆盖任务**：田块绘制/KML、可选 Fields2Cover 生成、稀疏标记预览、前进/倒车
+  轨迹元数据、`.arf.json` 保存、明确采用/上传/启动三步流程。
 - **发命令**：解锁/上锁、设置模式、RTL、启动任务(AUTO)、**急停**、**改速 (DO_CHANGE_SPEED)**、**暂停 (HOLD)**、**跳到航点**、Shift+点图引导前往(Goto)。
 - **地理围栏**：画包含/排除多边形、上传（MAV_MISSION_TYPE_FENCE）、启用/停用（DO_FENCE_ENABLE）、**越界告警**（FENCE_STATUS）。
 - **手柄/键盘遥控**：Gamepad API + 键盘（W/S=油门, A/D=转向, 空格=急停）→ RC_CHANNELS_OVERRIDE，MANUAL 模式应急驾驶/脱困。
@@ -148,8 +171,8 @@ web-gcs/
 
 ## 桥接 WebSocket 协议（前后端约定，便于二次开发）
 
-浏览器 → 桥接：`{t:'connect'|'disconnect'|'arm'|'mode'|'rtl'|'auto'|'pause'|'startMission'|'estop'|'goto'|'changeSpeed'|'setHome'|'setCurrent'|'uploadMission'|'downloadMission'|'getParams'|'setParam'|'tlogStart'|'tlogStop'|'uploadFence'|'fenceEnable'|'rc'|'rcRelease'}`
-桥接 → 浏览器：`{t:'link'|'hb'|'pos'|'gps'|'sys'|'vfr'|'text'|'ack'|'home'|'mission_current'|'mission_reached'|'mission_uploaded'|'mission_list'|'fence_status'|'param'|'params_done'|'tlog'|'log'|'stale'|'snapshot'}`
+浏览器 → 桥接：`{t:'connect'|'disconnect'|'arm'|'mode'|'rtl'|'auto'|'pause'|'startMission'|'estop'|'goto'|'changeSpeed'|'setHome'|'setCurrent'|'uploadMission'|'downloadMission'|'planCoverage'|'getParams'|'setParam'|'tlogStart'|'tlogStop'|'uploadFence'|'fenceEnable'|'rc'|'rcRelease'}`
+桥接 → 浏览器：`{t:'link'|'hb'|'pos'|'gps'|'sys'|'vfr'|'text'|'ack'|'home'|'mission_current'|'mission_reached'|'mission_uploaded'|'mission_list'|'coverage_status'|'coverage_plan'|'coverage_error'|'mstat'|'fence_status'|'param'|'params_done'|'tlog'|'log'|'stale'|'snapshot'}`
 
 ## MVP 范围说明 / 后续
 

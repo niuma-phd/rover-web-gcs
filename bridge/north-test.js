@@ -80,13 +80,18 @@ async function unitTest() {
   backend.handleCommand({ t: 'mode', mode: 'HOLD' });                       // HOLD -> IDLE
   backend.handleCommand({ t: 'uploadMission', items: [
     { lat: 22.6, lon: 113.9, alt: 0 }, { lat: 22.61, lon: 113.91, alt: 0 }] });
+  backend.handleCommand({ t: 'uploadMission', items: [
+    { lat: 22.6, lon: 113.9, yaw: 90, dir: 1, speed: 0.3, section: 1, planned: true },
+    { lat: 22.60001, lon: 113.90001, yaw: 90, dir: -1, speed: 0.15, section: 2, planned: true }] });
   backend.handleCommand({ t: 'getParams', names: ['CRUISE_SPEED'] });
-  backend.handleCommand({ t: 'setParam', id: 'CRUISE_SPEED', value: 99 });  // 超上限 2.5 -> clamped
+  backend.handleCommand({ t: 'setParam', id: 'CRUISE_SPEED', value: 99 });  // 超上限 6.0 -> clamped
+  backend.handleCommand({ t: 'setParam', id: 'MANUAL_SPEED', value: 6 });
   backend.handleCommand({ t: 'setParam', id: 'NOPE_PARAM', value: 1 });     // unknown_param -> 3
   backend.handleCommand({ t: 'changeSpeed', speed: 2 });                    // -> PARAM_SET CRUISE_SPEED
-  backend.handleCommand({ t: 'rc', steer: 0.5, throttle: 1 });              // -> MANUAL 流式
   backend.handleCommand({ t: 'reboot' });                                   // 真不支持 -> no-op + 日志
   await delay(300);
+  backend.handleCommand({ t: 'rc', steer: 0.5, throttle: 1 });              // -> MANUAL 流式
+  await delay(100);
 
   const sf = (t, pred) => stub.frames.find((f) => f.t === t && (!pred || pred(f)));
   check(!!sf('MODE', (f) => f.mode === 'IDLE' && typeof f.id === 'number'),
@@ -96,6 +101,10 @@ async function unitTest() {
   const wp = sf('WP');
   check(!!(wp && Array.isArray(wp.pts) && wp.pts.length === 2 && wp.pts[1].lat === 22.61 && wp.pts[1].lon === 113.91),
     'unit: uploadMission -> WP{pts×2 经纬度正确}');
+  const extendedWp = stub.frames.find((f) => f.t === 'WP' && f.allow_reverse === true);
+  check(!!(extendedWp && extendedWp.pts[1].dir === -1 && extendedWp.pts[1].speed === 0.15 &&
+      extendedWp.pts[1].planned === true),
+    'unit: F2C trajectory metadata (dir/speed/section/planned) survives browser -> north mapping');
   check(!!find('mission_uploaded', (m) => m.ok === true),
     'unit: WP 的 ACK -> mission_uploaded ok=true（任务状态 pill 通道）');
   check(!!find('mission_list', (m) => Array.isArray(m.items) && m.items.length === 2 && m.items[0].lat === 22.6),
@@ -104,15 +113,15 @@ async function unitTest() {
     'unit: getParams -> 逐名 PARAM_REQ');
   check(!!find('param', (m) => m.id === 'CRUISE_SPEED' && Math.abs(m.value - 1.0) < 1e-9),
     'unit: PARAM -> param{id:name, value}');
-  check(!!find('ack', (m) => m.result === 0 && /->2\.5/.test(String(m.msg || ''))),
+  check(!!find('ack', (m) => m.result === 0 && /->6/.test(String(m.msg || ''))),
     'unit: PARAM_SET 钳位 -> ack result=0（clamped 算成功，msg 带实际采纳值）');
   check(!!find('ack', (m) => m.result === 3),
     'unit: unknown_param -> ack result=3（UNSUPPORTED）');
   check(!!sf('PARAM_SET', (f) => f.name === 'CRUISE_SPEED' && f.value === 2),
     'unit: changeSpeed -> PARAM_SET CRUISE_SPEED=2（映射）');
   const man = sf('MANUAL');
-  check(!!(man && Math.abs(man.vx - 1.5) < 1e-9 && Math.abs(man.wz - 0.4) < 1e-9 && man.id === undefined),
-    'unit: rc -> MANUAL{vx=throttle*Vmax=1.5, wz=steer*Wmax=0.4, 无 id}');
+  check(!!(man && Math.abs(man.vx - 6.0) < 1e-9 && Math.abs(man.wz + 0.4) < 1e-9 && man.id === undefined),
+    'unit: MANUAL_SPEED=6 后 rc -> MANUAL{vx=6.0, wz=-steer*throttle*Wmax=-0.4, 无 id}');
   check(logs.some((l) => l.indexOf('unsupported command reboot') !== -1),
     'unit: 未知命令(reboot) -> no-op + 明确日志（north: unsupported command）');
   check(!stub.frames.some((f) => f.t === 'reboot' || f.t === 'REBOOT'),
@@ -125,6 +134,10 @@ async function unitTest() {
     'unit: estop -> ESTOP{on:true}');
   check(!!find('text', (m) => m.severity === 3 && String(m.text).indexOf('ESTOP') !== -1),
     'unit: SYS.fault=ESTOP -> text 告警行（变化去抖）');
+  backend.handleCommand({ t: 'estop', on: false });
+  await delay(150);
+  check(!!sf('ESTOP', (f) => f.on === false),
+    'unit: 解除软件急停 -> ESTOP{on:false}（解除后仍需重新 ARM）');
 
   // startMission -> MODE AUTO + MISSION start -> MSTAT RUNNING
   backend.handleCommand({ t: 'startMission' });
@@ -142,19 +155,19 @@ async function unitTest() {
       && Math.abs(f.pts[0].lat - 22.588) < 1e-9 && Math.abs(f.pts[0].lon - 113.949) < 1e-9),
     'unit: goto -> WP 单点[点击点] + AUTO + start');
 
-  // arm(false)=上锁 -> 新 MODE IDLE 软停（≠ 带外 ESTOP 闩锁，用 IDLE 帧计数增量证明发了新帧）
-  const idleBefore = stub.frames.filter((f) => f.t === 'MODE' && f.mode === 'IDLE').length;
+  // AutoRoverField：页面的一次 ARM/DISARM 原样进入车端，由车端 authorize/stop。
   backend.handleCommand({ t: 'arm', arm: false });
   await delay(150);
-  check(stub.frames.filter((f) => f.t === 'MODE' && f.mode === 'IDLE').length > idleBefore,
-    'unit: arm(false)=上锁 -> 新 MODE IDLE 软停');
-  // arm(true)=解锁 -> 仅本地 text 告知（北向无独立 arm 闸），不发任何北向帧
+  check(!!sf('ARM', (f) => f.arm === false && typeof f.id === 'number'),
+    'unit: arm(false) -> ARM{arm:false, 带 id}');
+  check(!!find('ack', (m) => m.command === 'ARM' && m.result === 0),
+    'unit: DISARM 的车端 ACK 回到页面');
   backend.handleCommand({ t: 'arm', arm: true });
-  await delay(100);
-  check(!!find('text', (m) => /无独立解锁|运动由/.test(String(m.text || ''))),
-    'unit: arm(true) -> 本地 text 告知（北向无独立 arm 闸）');
-  check(!stub.frames.some((f) => f.t === 'ARM' || f.t === 'arm'),
-    'unit: arm 未泄漏 ARM 帧到北向链路');
+  await delay(150);
+  check(!!sf('ARM', (f) => f.arm === true && typeof f.id === 'number'),
+    'unit: arm(true) -> ARM{arm:true, 带 id}');
+  check(!!find('hb', (m) => m.armed === true),
+    'unit: ARM 成功后的 SYS -> 页面 armed=true');
 
   // rtl 无 Home（白盒置空复现「定位固定前」）-> 明确拒绝，不静默、不发 WP
   backend.homeLat = null; backend.homeLon = null; backend.homeExplicit = false;
@@ -279,8 +292,8 @@ async function e2eTest() {
     check(!!sf('WP', (f) => Array.isArray(f.pts) && f.pts.length === 2), 'e2e: uploadMission -> 车端收 WP');
     check(!!sf('PARAM_SET', (f) => f.name === 'WP_RADIUS' && f.value === 1), 'e2e: setParam -> 车端收 PARAM_SET');
     check(!!sf('ESTOP', (f) => f.on === true), 'e2e: estop -> 车端收 ESTOP{on:true}');
-    check(!!sf('MANUAL', (f) => Math.abs(f.vx - 0.75) < 1e-9 && Math.abs(f.wz + 0.8) < 1e-9),
-      'e2e: rc -> 车端收 MANUAL（vx=0.5*1.5, wz=-1*0.8）');
+    check(!!sf('MANUAL', (f) => Math.abs(f.vx - 0.5) < 1e-9 && Math.abs(f.wz - 0.4) < 1e-9),
+      'e2e: rc -> 车端收 MANUAL（默认手动上限 1.0 m/s）');
     check(!!sf('HB'), 'e2e: HB 到达车端（COMMS_LOST 看门狗有喂）');
     check(!!sf('WP', (f) => Array.isArray(f.pts) && f.pts.length === 1 && Math.abs(f.pts[0].lat - 22.585) < 1e-9),
       'e2e: goto -> 车端收 WP 单点');

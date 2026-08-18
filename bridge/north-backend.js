@@ -27,8 +27,8 @@
  * 另起 2Hz HB 定时器喂车端 COMMS_LOST 看门狗（契约 §2.8；注意 RTCM 不喂 §2.9，
  * 所以 rtcm-relay 的改正流救不了断链判定——必须由本后端的 HB/命令流证明操作员在场）。
  *   goto     -> WP 单点 + MODE AUTO + MISSION start（北向无 GUIDED，用单点航点表等价「前往此点」）
- *   arm      -> 北向无 arm 闸（§2.1 注，VCU 可能无 arm 概念）：arm:false=上锁=MODE IDLE 软停；
- *               arm:true=解锁=本地 text 告知（运动由 模式+任务 使能，无独立解锁步）
+ *   arm      -> ARM{arm:true|false}。AutoRoverField 车端把一次页面操作映射为一次
+ *               本地 authorize/stop；RTK、地图和任务状态不参与手动解锁。
  *   rtl      -> 已知 Home 则合成 WP[Home]+AUTO+start；未知则明确拒绝（Home 由 setHome 权威/首 POSE 推断）
  *   setHome  -> GCS 侧记返航参考点（北向无 Home 帧）
  *   uploadFence -> 北向 v1 无地理围栏（契约 §8 预留 FENCE_*）→ 结构化拒绝（text+ack+任务栏失败态）。
@@ -76,10 +76,11 @@ class NorthBackend {
     // （与 RTCM 机器流掩盖看门狗同类，契约 §2.8/§2.9）。server.js 传 () => clients.size>0，
     // 并配 WS ping/pong 剔除半开死连接使该判据可靠。缺省 () => true 仅供直连单测（生产必传）。
     this.hasClients = (typeof opts.hasClients === 'function') ? opts.hasClients : () => true;
-    // MANUAL 软摇杆满舵标定（阿克曼 twist，契约 §2.6）：vx=throttle*vmax, wz=steer*wmax。
-    // 车端 rover_safety 仍会过阿克曼守卫（|wz|<=vx/R_min、vx≈0=>wz=0），此处只是满舵量程。
-    // ▲ 上车核：wmax 与 R_min 匹配；wz 正负号（REP-103 +z=左转 vs 摇杆右打正）若反了在此翻号。
-    this.vmax = (typeof opts.vmax === 'number' && isFinite(opts.vmax)) ? opts.vmax : 1.5;   // m/s
+    // MANUAL 软摇杆满舵标定（阿克曼 twist，契约 §2.6）。页面的 A/左为 steer<0，
+    // REP-103 左转为 wz>0；wz 同时乘 throttle，使倒车时车体 yaw 符号自然反向，
+    // 并保证松油门时不产生原地旋转命令。
+    this.vmax = Math.max(0.05, Math.min(6.0,
+      (typeof opts.vmax === 'number' && isFinite(opts.vmax)) ? opts.vmax : 1.0));   // m/s
     this.wmax = (typeof opts.wmax === 'number' && isFinite(opts.wmax)) ? opts.wmax : 0.8;   // rad/s
 
     this.client = null;
@@ -88,6 +89,7 @@ class NorthBackend {
     this.pending = new Map();   // id -> 下行类型串（供 ACK 翻译回浏览器 ack.command）
     this.lastFault = '';        // SYS.fault 去抖（变化才发 text 行）
     this.lastMstat = '';        // MSTAT 去抖（变化才发 text 行）
+    this.cachedPlan = [];       // 最近上传/车端回显的具体轨迹（北向下载按钮使用）
     // rtl 返航参考点：setHome 显式设置=权威（homeExplicit=true）；否则首个有效 POSE 推断为起点
     // （best-effort 兜底——北向无 Home 上行帧；GCS 中途接入时推断点可能非真起点，rtl 会注明）。
     this.homeLat = null; this.homeLon = null; this.homeExplicit = false;
@@ -200,7 +202,13 @@ class NorthBackend {
       }
       case 'MSTAT': {  // §3.4 -> 类型化 mstat 常发（前端未知类型自动忽略）+ 变化时 text 进度行
         const state = str(f.state, ''), cur = num(f.cur, 0), total = num(f.total, 0);
-        this.broadcast({ t: 'mstat', state, cur, total, dist_next: num(f.dist_next, null) });
+        this.broadcast({
+          t: 'mstat', state, cur, total,
+          dist_next: num(f.dist_next, null), cte: num(f.cte, null), dir: num(f.dir, null),
+          cmd_speed: num(f.cmd_speed, null), cmd_yaw: num(f.cmd_yaw, null),
+          curvature: num(f.curvature, null),
+          curvature_saturated: f.curvature_saturated === true,
+        });
         const key = state + ' ' + cur + '/' + total;
         if (key !== this.lastMstat) {
           this.lastMstat = key;
@@ -218,7 +226,9 @@ class NorthBackend {
       case 'PARAM': {  // §3.7 -> 前端 param（name->id，i/n->index/count）
         const name = str(f.name, '');
         if (!name) break;
-        this.broadcast({ t: 'param', id: name, value: num(f.value, 0), index: num(f.i, 1), count: num(f.n, 1) });
+        const value = num(f.value, 0);
+        if (name === 'MANUAL_SPEED') this.vmax = Math.max(0.05, Math.min(6.0, value));
+        this.broadcast({ t: 'param', id: name, value, index: num(f.i, 1), count: num(f.n, 1) });
         break;
       }
       case 'ACK': {    // §3.1 -> 前端 ack（ok/result 枚举串 -> 数字 result）
@@ -241,8 +251,15 @@ class NorthBackend {
           if (!p || typeof p !== 'object') continue;
           const lat = num(p.lat), lon = num(p.lon);
           if (lat === null || lon === null) continue;   // 缺/错类型点跳过（同车端 parse_down 风格）
-          items.push({ lat, lon, alt: 0 });
+          const item = { lat, lon, alt: 0 };
+          if (num(p.yaw) !== null) item.yaw = num(p.yaw);
+          if (num(p.dir) !== null) item.dir = num(p.dir) < 0 ? -1 : 1;
+          if (num(p.speed) !== null) item.speed = Math.abs(num(p.speed));
+          if (num(p.section) !== null) item.section = Math.trunc(num(p.section));
+          if (p.planned === true) item.planned = true;
+          items.push(item);
         }
+        this.cachedPlan = items;
         this.broadcast({ t: 'mission_list', items, plan: true, src: str(f.src, '') });
         this.log('north: PLAN 预览 ' + items.length + ' 点 (src=' + (str(f.src, '') || '?') + ')');
         break;
@@ -295,12 +312,24 @@ class NorthBackend {
           if (!it || typeof it !== 'object') continue;
           const lat = num(it.lat), lon = num(it.lon);
           if (lat === null || lon === null) continue;
-          pts.push({ lat, lon });
+          const point = { lat, lon };
+          const yaw = num(it.yaw), speed = num(it.speed), section = num(it.section), direction = num(it.dir);
+          if (yaw !== null) point.yaw = yaw;
+          if (speed !== null) point.speed = Math.abs(speed);
+          if (section !== null) point.section = Math.trunc(section);
+          if (direction !== null) point.dir = direction < 0 ? -1 : 1;
+          if (it.planned === true) point.planned = true;
+          pts.push(point);
         }
         if (!pts.length) { this.log('north: uploadMission 无有效航点，忽略'); break; }
-        this._cmd('WP', { pts });
+        this.cachedPlan = pts;
+        this._cmd('WP', { pts, allow_reverse: pts.some((p) => p.dir < 0) });
         break;
       }
+      case 'downloadMission':
+        if (this.cachedPlan.length) this.broadcast({ t: 'mission_list', items: this.cachedPlan, plan: false, src: 'cached' });
+        else this._cmd('MISSION', { cmd: 'download' });
+        break;
       case 'getParams': {       // -> 逐名 PARAM_REQ（§2.7）；带 id 但**无 ACK**（PARAM 流应答）-> 不入 pending
         for (const nRaw of (Array.isArray(m.names) ? m.names : [])) {
           const name = String(nRaw == null ? '' : nRaw).trim();
@@ -324,7 +353,10 @@ class NorthBackend {
       case 'rc': {              // -> MANUAL 流式 twist（§2.6，无 id 无 ACK；仅 MANUAL 模式在车端生效）
         const steer = clamp1(num(m.steer, 0));
         const throttle = clamp1(num(m.throttle, 0));
-        this._stream('MANUAL', { vx: throttle * this.vmax, wz: steer * this.wmax });
+        this._stream('MANUAL', {
+          vx: throttle * this.vmax,
+          wz: -steer * throttle * this.wmax,
+        });
         break;
       }
       case 'rcRelease': this._stream('MANUAL', { vx: 0, wz: 0 }); break;   // 松手 = 零速（车端守卫兜底）
@@ -332,20 +364,16 @@ class NorthBackend {
         // 覆盖当前航点表（同 MAVLink guided divert）；ESTOP 闩锁下不会移动（失效保护仍在）。
         const lat = num(m.lat), lon = num(m.lon);
         if (lat === null || lon === null) { this._localText(4, 'goto 坐标无效，忽略'); break; }
-        this._cmd('WP', { pts: [{ lat, lon }] });
+        this._cmd('WP', { pts: [{ lat, lon }], allow_reverse: false });
         this._cmd('MODE', { mode: 'AUTO' });
         this._cmd('MISSION', { cmd: 'start' });
         break;
       }
-      case 'arm': {             // 北向无独立 arm/disarm（§2.1 注，VCU 可能无 arm 概念）：
-        if (m.arm === false) {  // 上锁/disarm = 软停到零速待命（MODE IDLE）——≠ 带外 ESTOP 的急停闩锁
-          this._cmd('MODE', { mode: 'IDLE' });
-          this._localText(6, '上锁 → 切 IDLE 零速待命（北向无 arm 概念；紧急停车请用急停 = ESTOP 带外闩锁）');
-        } else {                // 解锁/arm：北向无使能闸，运动由 模式(AUTO/MANUAL)+任务 使能 -> 仅告知，不发帧
-          this._localText(6, '北向无独立解锁：运动由 模式(AUTO/MANUAL)+任务 使能，无需先解锁');
-        }
+      case 'arm':
+        // 页面只做一次 ARM/DISARM。车端负责生成本地 token 并返回明确 ACK；
+        // 手动解锁不依赖 RTK、地图、路线或规划器。
+        this._cmd('ARM', { arm: m.arm !== false });
         break;
-      }
       case 'rtl': {             // 返航：北向无 RTL 模式 -> 已知 Home 则合成 WP[Home]+AUTO+start，否则明确拒绝
         // （不静默）。Home 来源：显式 setHome（权威）或首个有效 POSE（推断起点）。避障=不做（同 WP/goto）。
         if (this.homeLat === null || this.homeLon === null) {
@@ -353,7 +381,7 @@ class NorthBackend {
           this._localText(4, '返航失败：未知返航点（请先「设置Home」或等定位固定后重试）');
           break;
         }
-        this._cmd('WP', { pts: [{ lat: this.homeLat, lon: this.homeLon }] });
+        this._cmd('WP', { pts: [{ lat: this.homeLat, lon: this.homeLon }], allow_reverse: false });
         this._cmd('MODE', { mode: 'AUTO' });
         this._cmd('MISSION', { cmd: 'start' });
         this._localText(6, '返航：前往 Home' + (this.homeExplicit ? '' : '（推断起点，未显式设置 Home）'));

@@ -22,6 +22,7 @@ const { Writable } = require('stream');
 const { WebSocketServer } = require('ws');
 const { RtcmRelay } = require('./rtcm-relay');
 const { NorthBackend } = require('./north-backend');
+const { planCoverage } = require('./coverage-planner');
 
 const {
   MavLinkPacketSplitter, MavLinkPacketParser, MavLinkProtocolV2,
@@ -48,12 +49,15 @@ const NTRIP_USER = process.env.NTRIP_USER || '';
 const NTRIP_PASS = process.env.NTRIP_PASS || '';
 const NORTH_HOST = (process.env.NORTH_HOST || '127.0.0.1').trim();
 const NORTH_PORT = parseInt(process.env.NORTH_PORT || '6001', 10);
+const NORTH_VMAX = Number(process.env.NORTH_VMAX || '1.0');
+const NORTH_WMAX = Number(process.env.NORTH_WMAX || '0.8');
 let rtcmRelay = null;
 
 // ---- 北向协议后端（「协议切换」）：connect{transport:'north'} 时替代整条 MAVLink 链 ----
 // null = 未激活（默认）——此时下方所有 north 守卫短路，MAVLink 行为 100% 不变。
 // 翻译层（契约↔WS-JSON 映射）见 bridge/north-backend.js；线协议权威 = docs/接口契约_v1.md。
 let northBackend = null;
+let coveragePlanning = false;
 
 // ---- ArduPilot Rover flight modes (custom_mode) -------------------------------
 const ROVER_MODES = {
@@ -182,6 +186,7 @@ function connectLink(cfg) {
   // 自研车端走 JSON-lines TCP（rover_gcs_bridge :6001），link/遥测广播由 NorthBackend 自己发。
   if (cfg.transport === 'north') {
     northBackend = new NorthBackend({ host: cfg.host, port: cfg.port, broadcast, log,
+      vmax: NORTH_VMAX, wmax: NORTH_WMAX,
       hasClients: () => clients.size > 0 });   // HB 仅在有活浏览器时喂车端看门狗（防机器流掩盖 COMMS_LOST）
     northBackend.connect();
     return;
@@ -558,6 +563,23 @@ function log(msg) {
 
 function handleClientMessage(raw) {
   let m; try { m = JSON.parse(raw); } catch (_) { return; }
+  if (m.t === 'planCoverage') {
+    if (coveragePlanning) {
+      broadcast({ t: 'coverage_error', error: '已有一个覆盖规划正在计算' });
+      return;
+    }
+    coveragePlanning = true;
+    broadcast({ t: 'coverage_status', state: 'PLANNING' });
+    planCoverage(m).then((result) => {
+      broadcast(Object.assign({ t: 'coverage_plan' }, result));
+      log('Fields2Cover: ' + result.swaths + ' swaths, ' + result.items.length +
+        ' samples, ' + Number(result.lengthM || 0).toFixed(1) + ' m');
+    }).catch((error) => {
+      broadcast({ t: 'coverage_error', error: error.message || String(error) });
+      log('Fields2Cover failed: ' + (error.message || error));
+    }).finally(() => { coveragePlanning = false; });
+    return;
+  }
   // ---- 北向激活时：connect/disconnect 之外的命令全部交北向后端翻译（不进 MAVLink switch）----
   if (northBackend && m.t !== 'connect' && m.t !== 'disconnect') { northBackend.handleCommand(m); return; }
   switch (m.t) {

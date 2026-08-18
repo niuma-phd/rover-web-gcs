@@ -1,4 +1,135 @@
-# 在线演示 + 反馈闭环部署说明
+# Rover Web GCS 部署说明
+
+本文先说明 AutoRover RTK 现场部署，再保留公网演示和反馈闭环部署。现场车端与地面站可以
+部署在同一台 Ubuntu 主机，也可以由浏览器通过局域网访问地面站；浏览器不直接连接 VCU。
+
+## A. AutoRover RTK 现场部署
+
+### A.1 依赖和安装
+
+地面站要求 Node.js 18 或更高版本。首次部署或 `package-lock.json` 更新后执行：
+
+```bash
+git clone https://github.com/niuma-phd/rover-web-gcs.git
+cd rover-web-gcs
+npm ci
+npm test
+```
+
+`npm test` 默认覆盖 MAVLink、自带仿真、RTCM 和 AutoRover 北向协议。Fields2Cover 是外部
+可选依赖：未安装时真实覆盖规划集成会明确跳过，不影响其它地面站功能。
+
+### A.2 接入 AutoRover 车端
+
+车端先启动 JSON-lines TCP 北向服务，默认监听 `127.0.0.1:6001`。然后启动地面站：
+
+```bash
+cd /opt/rover-web-gcs
+PORT=8080 \
+NORTH_HOST=127.0.0.1 \
+NORTH_PORT=6001 \
+NORTH_VMAX=1.00 \
+NORTH_WMAX=0.375 \
+npm start
+```
+
+浏览器打开 `http://车机IP:8080`，选择 `AutoRover RTK`，连接 `127.0.0.1:6001`。确认页面
+有位置、航向、RTK、速度、电压和 DISARM 状态后，再进行 ARM 或任务操作。
+
+`NORTH_VMAX` 是地面站进程刚启动时的手动速度预设；连接车端后，`MANUAL_SPEED`、
+`CRUISE_SPEED` 和 `REVERSE_SPEED` 参数会采用车端返回值。不要把速度上限误当成启动预设。
+
+### A.3 接入 Fields2Cover
+
+将已构建的 `auto_rover_f2c` 及其共享库部署到固定目录，例如：
+
+```text
+/opt/auto-rover-field/bin/auto_rover_f2c
+/opt/auto-rover-field/lib/libFields2CoverLite.so
+```
+
+启动和验证：
+
+```bash
+export AUTO_ROVER_F2C_BIN=/opt/auto-rover-field/bin/auto_rover_f2c
+export LD_LIBRARY_PATH=/opt/auto-rover-field/lib:${LD_LIBRARY_PATH:-}
+npm run coveragetest
+npm start
+```
+
+覆盖规划顺序固定为：
+
+```text
+生成并预览 → 采用并上传 → ARM → 启动
+```
+
+地面站只接受带 `fieldContained:true` 的轨迹。生成和上传不会启动车辆；启动命令由操作员
+单独触发。`.arf.json` 用于保留前进/倒车、速度、航向和段类型，QGC `.waypoints` 不保留
+这些扩展字段。
+
+### A.4 systemd 常驻部署（可选）
+
+将非敏感运行参数放入 `/etc/rover-web-gcs.env`：
+
+```text
+PORT=8080
+NORTH_HOST=127.0.0.1
+NORTH_PORT=6001
+NORTH_VMAX=1.00
+NORTH_WMAX=0.375
+AUTO_ROVER_F2C_BIN=/opt/auto-rover-field/bin/auto_rover_f2c
+LD_LIBRARY_PATH=/opt/auto-rover-field/lib
+```
+
+创建 `/etc/systemd/system/rover-web-gcs.service`：
+
+```ini
+[Unit]
+Description=Rover Web Ground Control Station
+After=network-online.target
+
+[Service]
+Type=simple
+User=rover
+WorkingDirectory=/opt/rover-web-gcs
+EnvironmentFile=/etc/rover-web-gcs.env
+ExecStart=/usr/bin/node bridge/server.js
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+```
+
+启用、查看和停止：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now rover-web-gcs
+sudo systemctl status rover-web-gcs
+journalctl -u rover-web-gcs -f
+sudo systemctl stop rover-web-gcs
+```
+
+### A.5 更新、回滚和验收
+
+更新前先 DISARM 并停止地面站；地面站停止不会代替车端独立停车机制。
+
+```bash
+sudo systemctl stop rover-web-gcs
+cd /opt/rover-web-gcs
+git fetch --tags origin
+git checkout <reviewed-tag-or-commit>
+npm ci
+npm test
+sudo systemctl start rover-web-gcs
+```
+
+回滚时用相同流程切回上一个已验证标签或提交。上线后至少确认：HTTP 页面可访问、北向链路
+连通、状态为 DISARM、位置/航向/RTK/电压更新、手动零速释放有效，以及 F2C 预览显示
+田块内校验通过。部署文件和日志中不得写入 NTRIP、地图或站点口令。
+
+## B. 在线演示 + 反馈闭环
 
 把本机正在运行的 Rover Web GCS（连着真实 SITL）安全地放到公网做**单人演示**，
 并配一套「反馈 → AI 初审 → 人工放行」的闭环。分三个阶段，每一步都可单独验证。

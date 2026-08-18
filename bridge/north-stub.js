@@ -29,7 +29,9 @@ const { EventEmitter } = require('events');
 
 // 参数表子集（docs/参数表.json 的字段形状；stub 只需几条供 PARAM_REQ/SET 测试）
 const PARAM_DEFS = {
-  CRUISE_SPEED: { def: 1.5, min: 0.0, max: 2.5, group: 'guidance', unit: 'm/s', value: 1.0 },
+  MANUAL_SPEED: { def: 1.0, min: 0.05, max: 6.0, group: 'manual', unit: 'm/s', value: 1.0 },
+  CRUISE_SPEED: { def: 1.0, min: 0.05, max: 6.0, group: 'guidance', unit: 'm/s', value: 1.0 },
+  REVERSE_SPEED:{ def: 1.0, min: 0.05, max: 6.0, group: 'guidance', unit: 'm/s', value: 1.0 },
   WP_RADIUS:    { def: 0.5, min: 0.1, max: 5.0, group: 'guidance', unit: 'm',   value: 0.5 },
   RTK_POLICY:   { def: 0,   min: 0,   max: 1,   group: 'safety',   unit: '',    value: 0 },
 };
@@ -141,6 +143,14 @@ class NorthStub extends EventEmitter {
     switch (j.t) {
       case 'HB':
         break;   // 喂看门狗（stub 不建模 COMMS_LOST 超时），无应答（§2.8）
+      case 'ARM': {
+        const arm = (typeof j.arm === 'boolean') ? j.arm : true;
+        this.safety = arm ? 'RUN' : 'IDLE';
+        if (!arm) this.mode = 'IDLE';
+        ack(true, 'ok', arm ? 'authorized' : 'disarmed');
+        this._sendSysAll();
+        break;
+      }
       case 'ESTOP': {
         // on 缺省/错类型 -> true（宁停勿走，同 parse_down 的 fail-safe 缺省）
         const on = (typeof j.on === 'boolean') ? j.on : true;
@@ -164,14 +174,21 @@ class NorthStub extends EventEmitter {
           for (const p of j.pts) {
             if (!p || typeof p !== 'object') continue;
             if (typeof p.lat !== 'number' || typeof p.lon !== 'number') continue;
-            pts.push({ lat: p.lat, lon: p.lon });
+            const point = { lat: p.lat, lon: p.lon };
+            if (typeof p.yaw === 'number') point.yaw = p.yaw;
+            if (typeof p.dir === 'number') point.dir = p.dir < 0 ? -1 : 1;
+            if (typeof p.speed === 'number') point.speed = Math.abs(p.speed);
+            if (typeof p.section === 'number') point.section = Math.trunc(p.section);
+            if (p.planned === true) point.planned = true;
+            pts.push(point);
           }
         }
         if (!pts.length) { ack(false, 'bad_arg', 'no valid pts'); break; }
         this.mstat = { state: 'IDLE', cur: 0, total: pts.length };
         ack(true, 'ok', 'wp n=' + pts.length);
         // §3.8：WP 直给航点亦回显 PLAN 预览（src:wp）
-        this._send(c, { t: 'PLAN', src: 'wp', n: pts.length, pts: pts.map((p) => ({ lat: p.lat, lon: p.lon, yaw: 88.7 })) });
+        this._send(c, { t: 'PLAN', src: pts.some((p) => p.planned) ? 'coverage' : 'wp', n: pts.length,
+          pts: pts.map((p) => Object.assign({ yaw: 88.7 }, p)) });
         this._sendMstatAll();
         break;
       }
@@ -233,6 +250,7 @@ class NorthStub extends EventEmitter {
         this.params[name] = v;
         if (v !== j.value) ack(true, 'clamped', name + '=' + j.value + '->' + v);
         else ack(true, 'ok', name + '=' + v);
+        this._sendParam(c, name, 1, 1);
         break;
       }
       case 'PARAM_SAVE':

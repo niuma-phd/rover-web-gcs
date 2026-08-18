@@ -18,7 +18,8 @@
     "rtcmtest": "node bridge/rtcm-test.js",
     "northtest": "node bridge/north-test.js",
     "northfixtest": "node bridge/north-fix-test.js",
-    "test": "node bridge/selftest.js && node bridge/itest.js && node sim/simtest.js && node bridge/rtcm-test.js && node bridge/north-test.js && node bridge/north-fix-test.js"
+    "coveragetest": "node bridge/coverage-test.js",
+    "test": "node bridge/selftest.js && node bridge/itest.js && node sim/simtest.js && node bridge/rtcm-test.js && node bridge/north-test.js && node bridge/north-fix-test.js && node bridge/coverage-test.js"
   },
   "dependencies": {
     "leaflet": "^1.9.4",
